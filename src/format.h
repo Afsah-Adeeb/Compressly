@@ -30,6 +30,20 @@
 //   +1      1     minimum match length
 //   +2      ..    LZSS-framed token stream (below)
 //
+// METHOD 4 -- BLOCKED: a sequence of independent blocks, each framed as
+//   4  uncompressed length of this block (little-endian)
+//   4  payload length of this block (little-endian), excluding these 8 bytes and the
+//      method byte
+//   1  the method used for this block (0, 1, 2 or 3 -- never 4; blocks do not nest)
+//   ..  the block payload
+// repeated until the container header's uncompressed size has been accounted for.
+//
+// Nine bytes of framing per block. Each block carries its own length rather than relying
+// on a fixed block size recorded once, which costs four bytes and buys two things: the
+// decoder never needs to know the encoder's block size, and a decoder can walk the block
+// boundaries without decoding anything. The blocks share no history and no Huffman trees,
+// which is what makes bounded-memory streaming and parallel compression possible.
+//
 // METHOD 3 -- DEFLATE-STYLE (LZ77 + Huffman):
 //   +0      1     window bits
 //   +1      2     HLIT:  number of literal/length code lengths stored (little-endian)
@@ -82,7 +96,7 @@ enum class Method : std::uint8_t {
   kHuffman = 1,
   kLz77 = 2,
   kDeflate = 3,
-  // Reserved for later phases: 4 = parallel blocks.
+  kBlocked = 4,
 };
 
 }  // namespace cmpr

@@ -318,3 +318,173 @@ reversibility, because a transcription typo in a constant table corrupts one nar
 of values that a roundtrip test would only catch by luck. Plus matches at the table
 extremes through the full encoder, 200 KB runs, config rejection for settings the tables
 cannot express, and corrupt HLIT/HDIST/window fields.
+
+---
+
+## Phase 4 — Blocks and streaming
+
+The input is cut into independent blocks, each compressed with no reference to any other:
+no shared history, no shared Huffman trees. That is what makes bounded-memory streaming
+and (Phase 5) parallel compression possible.
+
+Container method 4, nine bytes of framing per block. Each block carries its own lengths
+rather than relying on a block size recorded once — four extra bytes, in exchange for a
+decoder that never needs to know the encoder's block size and can walk block boundaries
+without decoding anything.
+
+### Block size is a real optimum, and 64 KiB would have been the worst choice
+
+Total compressed size over seven corpus files (140.5 MB of Silesia plus samba):
+
+| Block size | Total output | Reduction |
+|---|---|---|
+| 64 KiB | 44,133,751 | 68.58% |
+| unblocked | 42,970,414 | 69.41% |
+| 256 KiB | 42,595,887 | 69.68% |
+| 4 MiB | 42,452,843 | 69.78% |
+| **1 MiB** | **42,393,087** | **69.82%** |
+
+Two forces pull against each other. Every block pays for its own Huffman code length
+tables — around 320 bytes — so at 64 KiB that overhead alone is 0.5% of the output. But
+one set of trees stretched over a whole file fits none of it well. 1 MiB is where the
+curve turns, and it is the default.
+
+The effect is strongly content-dependent, which the aggregate hides:
+
+| File | What it is | Unblocked | 256 KiB | 1 MiB | Best |
+|---|---|---|---|---|---|
+| samba | source tarball, many file types | 73.14% | 74.31% | 74.23% | 256 KiB |
+| mozilla | binary tarball | 61.28% | 62.16% | 62.06% | 256 KiB |
+| dickens | one plain-text book | 62.05% | 61.42% | 61.91% | unblocked |
+| nci | uniform chemical database | 90.68% | 90.39% | 90.61% | unblocked |
+
+Heterogeneous archives want small blocks so the trees can track content that changes;
+homogeneous files want one tree fitted to the whole thing. A tarball of source code gains
+1.2 points from blocking; a novel loses 0.6. Same knob, opposite signs, and the reason is
+entirely about what is in the file.
+
+### Memory is bounded by block size, not file size
+
+Peak working set, compressing `mozilla` (51 MB):
+
+| Path | Peak memory | Throughput | Output |
+|---|---|---|---|
+| in-memory, unblocked | 151.0 MiB | 19.7 MB/s | 19,834,809 |
+| in-memory, 1 MiB blocks | 90.6 MiB | 21.5 MB/s | 19,431,440 |
+| streaming, 1 thread | **14.1 MiB** | 22.4 MB/s | 19,431,440 |
+| streaming, 8 threads | 41.8 MiB | 83.7 MB/s | 19,431,440 |
+| streaming decompress | 7.0 MiB | 104.9 MB/s | — |
+
+Then the same binary on a 636 MB file — 12x larger:
+
+| | Peak memory | Throughput |
+|---|---|---|
+| streaming compress, 8 threads | 44.1 MiB | 70.0 MB/s |
+| streaming decompress | 8.1 MiB | 114.3 MB/s |
+
+44.1 MiB against 41.8 MiB for a file twelve times smaller. Memory is a function of
+(block size x threads), not of input size, which is the whole claim. The in-memory path
+peaks at roughly 3x the file size — input, plus output, plus the token vector — so it is
+the one that cannot survive a file larger than RAM.
+
+**All four paths produce byte-identical output.** In-memory and streaming, one thread and
+eight. Asserted by a test, not just observed here: two code paths meant to agree drift
+apart unless something checks.
+
+### Decisions
+
+- **Per-block lengths rather than an index at the front.** An index would need either two
+  passes or a seekable output to patch afterwards. Per-block framing streams in one pass
+  in both directions and still lets a reader find block boundaries cheaply.
+- **Blocking only above the block size.** A file that fits in one block is written as a
+  plain single-block file, so small files pay no framing at all.
+- **Blocks do not nest.** A block claiming method 4 is rejected, which closes off a
+  recursive-expansion attack on the decoder.
+- **The streaming and in-memory paths converge for small inputs**: below one block, the
+  streaming function reads the input and calls the in-memory one. Two implementations of
+  the same framing is one too many.
+
+---
+
+## Phase 5 — Parallel block compression
+
+A fixed-size thread pool with a shared work queue, hand-written: `std::thread`,
+`std::mutex`, `std::condition_variable`, about 80 lines. Blocks are handed out by index,
+compressed concurrently, and assembled strictly in order.
+
+### Speedup
+
+`samba` (21.6 MB), in-memory, 1 MiB blocks. Machine: Intel i5-10300H, **4 physical cores,
+8 logical**.
+
+| Threads | MB/s | Speedup |
+|---|---|---|
+| 1 | 27.4 | 1.00x |
+| 2 | 48.5 | 1.77x |
+| 3 | 68.2 | 2.49x |
+| 4 | 71.9 | 2.62x |
+| 6 | 96.5 | 3.52x |
+| 8 | 101.8 | **3.71x** |
+| 12 | 87.3 | 3.19x |
+| 16 | 78.6 | 2.87x |
+
+Streaming `mozilla` shows the same shape: 22.4 MB/s at one thread, 83.7 at eight, 3.74x.
+
+### Why it flattens — four causes, in order of size
+
+**1. There are only four real cores.** The jump from 4 threads (2.62x) to 8 (3.71x) is
+hyperthreading, and 1.42x from the second thread on each core is about what SMT gives on
+a workload like this — hash chain walking stalls on memory often enough that a second
+thread has gaps to fill, but the two threads still share one set of execution units. Past
+8 the curve turns over: 16 threads is slower than 8, because oversubscribing 8 logical
+processors adds context switching and cache thrashing and buys nothing.
+
+**2. Clock throttling.** The i5-10300H runs 2.5 GHz base and boosts far higher on one
+active core than on four. A meaningful slice of the missing scaling at 4 threads is simply
+that each core is running slower than the single-threaded baseline did. This is invisible
+unless you go looking for it, and it is why "why isn't it 4x?" has no single answer.
+
+**3. Amdahl's law on the parts that stay sequential.** Reading the input, allocating the
+output, and concatenating the compressed blocks into it are all serial. Concatenation is a
+memcpy of the entire compressed output — 5.5 MB for samba — while every core waits. At 62%
+of theoretical 4-core scaling, Amdahl puts the serial fraction near 15%, which matches the
+I/O-plus-assembly share.
+
+**4. Memory bandwidth.** Match finding is a random walk over a 32 KiB window through hash
+chains, four cores sharing one L3 and one memory controller. This is the least separable
+of the four and the hardest to prove without hardware counters.
+
+### Decisions
+
+- **A hand-written pool, not OpenMP.** `#pragma omp parallel for` would do this in one
+  line, and that is exactly the objection: the pragma would be doing the work and there
+  would be nothing to explain.
+- **No work stealing.** Every block is the same size and costs roughly the same to
+  compress, so there is no skew for stealing to correct. It would add per-worker deques
+  and a steal protocol to fix a problem this workload does not have, and none of the four
+  causes above is one stealing would touch.
+- **Thread count never changes the output.** Blocks are compressed in whatever order
+  threads pick them up but assembled by index, so a 1-thread and an 8-thread run produce
+  identical bytes. Without that, no benchmark comparing them would mean anything and any
+  bug would reproduce only sometimes. There is a test.
+- **A task that throws is still counted as finished.** Otherwise `forEach` waits forever
+  for a task that is never coming back — a deadlock rather than an error. The first
+  exception is captured and rethrown on the calling thread once every task has finished.
+- **Decompression stays single-threaded.** The format permits parallel decode — blocks are
+  independent and their boundaries are walkable — but one decoder implementation means one
+  roundtrip test and no second correctness surface. Decompression already runs at
+  105-145 MB/s, four to five times faster than compression, so it is not the bottleneck
+  worth attacking.
+- **The pool is constructed per call in the in-memory path**, which costs a few hundred
+  microseconds of thread creation. Irrelevant against multi-second compressions, visible
+  on small ones. The streaming path builds it once outside the loop.
+
+### Correctness
+
+67 tests. New: the pool runs every index exactly once at 1, 2, 4 and 8 workers; tasks
+genuinely overlap; an exception propagates and leaves the pool reusable; blocked
+roundtrips across eight block sizes including exact boundary multiples; per-block method
+selection verified by walking the framing (a mixed file must contain both stored and
+deflate blocks); streaming output byte-identical to in-memory across sizes, block sizes,
+thread counts and all three algorithms; all four encoder/decoder path combinations; and
+corrupt block framing — oversized lengths, nested blocks, truncation.

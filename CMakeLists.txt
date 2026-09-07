@@ -16,13 +16,22 @@ add_library(cmpr STATIC
   src/huffman.cpp
   src/lz77.cpp
   src/deflate.cpp
+  src/block.cpp
+  src/threadpool.cpp
   src/codec.cpp
 )
 target_include_directories(cmpr PUBLIC src)
 target_compile_options(cmpr PRIVATE -Wall -Wextra -Wpedantic)
 
+find_package(Threads REQUIRED)
+target_link_libraries(cmpr PUBLIC Threads::Threads)
+
 add_executable(compressor tools/cli.cpp)
 target_link_libraries(compressor PRIVATE cmpr)
+if(WIN32)
+  # For the peak working-set query used to report memory use.
+  target_link_libraries(compressor PRIVATE psapi)
+endif()
 
 # Sweeps the LZ77 tuning knobs and prints the ratio/throughput table that goes in
 # the writeup. Kept separate from the CLI: it is a measurement instrument, not a
@@ -36,6 +45,8 @@ add_executable(tests
   tests/test_huffman.cpp
   tests/test_lz77.cpp
   tests/test_deflate.cpp
+  tests/test_blocked.cpp
+  tests/test_threadpool.cpp
   tests/test_roundtrip.cpp
 )
 target_link_libraries(tests PRIVATE cmpr)

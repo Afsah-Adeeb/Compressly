@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "codec.h"
+#include "deflate.h"
+#include "threadpool.h"
 #include "lz77.h"
 
 namespace {
@@ -156,6 +158,30 @@ void sweepFile(const std::string& path) {
     cmpr::lz77::Config config = defaults;
     config.lazyMatching = lazy;
     printRow(lazy ? "lazy on" : "lazy off", input.size(), measure(input, lz77With(config)));
+  }
+
+  // Two opposing forces set the optimum here. Small blocks pay for a set of Huffman
+  // tables each; large blocks make one set of trees cover content it does not fit.
+  std::printf("\n  -- block size ---------------------------------------------------------\n");
+  for (std::size_t blockSize : {std::size_t{0}, std::size_t{16} << 10, std::size_t{64} << 10,
+                                std::size_t{256} << 10, std::size_t{1} << 20,
+                                std::size_t{4} << 20, std::size_t{16} << 20}) {
+    cmpr::Options options;
+    options.blockSize = blockSize;
+    const std::string label =
+        blockSize == 0
+            ? std::string("unblocked")
+            : (blockSize >= (std::size_t{1} << 20) ? std::to_string(blockSize >> 20) + " MiB"
+                                                   : std::to_string(blockSize >> 10) + " KiB");
+    printRow("block " + label, input.size(), measure(input, options));
+  }
+
+  std::printf("\n  -- threads ------------------------------------------------------------\n");
+  for (int threads : {1, 2, 3, 4, 6, 8, 12, 16}) {
+    if (threads > cmpr::resolveThreadCount(0) * 2) break;
+    cmpr::Options options;
+    options.threads = threads;
+    printRow("threads " + std::to_string(threads), input.size(), measure(input, options));
   }
 }
 

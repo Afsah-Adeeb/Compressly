@@ -2,10 +2,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <istream>
+#include <ostream>
+#include <stdexcept>
 
-#include "bitio.h"
-#include "deflate.h"
-#include "huffman.h"
+#include "threadpool.h"
 
 namespace cmpr {
 namespace {
@@ -27,256 +28,137 @@ std::uint64_t readU64LE(const std::uint8_t* p) {
   return value;
 }
 
-std::vector<std::uint8_t> storeRaw(const std::uint8_t* data, std::size_t size) {
+std::uint32_t readU32LE(const std::uint8_t* p) {
+  return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+         (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+void appendU32LE(std::vector<std::uint8_t>& out, std::uint32_t value) {
+  for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>((value >> (8 * i)) & 0xFF));
+}
+
+// Per-block framing for method 4: uncompressed length, payload length, method byte.
+// Nine bytes per block -- 0.001% at the default 1 MiB block size.
+constexpr std::size_t kBlockHeaderSize = 9;
+
+void appendBlock(std::vector<std::uint8_t>& out, std::size_t uncompressedSize,
+                 const EncodedBlock& block) {
+  appendU32LE(out, static_cast<std::uint32_t>(uncompressedSize));
+  appendU32LE(out, static_cast<std::uint32_t>(block.payload.size()));
+  out.push_back(static_cast<std::uint8_t>(block.method));
+  out.insert(out.end(), block.payload.begin(), block.payload.end());
+}
+
+std::size_t blockCountFor(std::uint64_t size, std::size_t blockSize) {
+  return static_cast<std::size_t>((size + blockSize - 1) / blockSize);
+}
+
+bool shouldBlock(std::size_t size, const Options& options) {
+  return options.blockSize > 0 && size > options.blockSize;
+}
+
+// The most expansive thing any method can do is turn one bit into kMaxMatch output bytes.
+// Used to bound allocations against a header claiming an implausible size.
+constexpr std::uint64_t kMaxExpansionPerPayloadByte = 8 * 258;
+
+std::vector<std::uint8_t> compressSingleBlock(const std::uint8_t* data, std::size_t size,
+                                              const Options& options) {
+  const EncodedBlock block = encodeBlock(data, size, options.algorithm, options.lz77);
   std::vector<std::uint8_t> out;
-  out.reserve(kHeaderSize + size);
-  putHeader(out, Method::kStored, size);
-  out.insert(out.end(), data, data + size);
+  out.reserve(kHeaderSize + block.payload.size());
+  putHeader(out, block.method, size);
+  out.insert(out.end(), block.payload.begin(), block.payload.end());
   return out;
 }
 
-// ---------------------------------------------------------------- Huffman (method 1)
+std::vector<std::uint8_t> compressBlocked(const std::uint8_t* data, std::size_t size,
+                                          const Options& options) {
+  const std::size_t blocks = blockCountFor(size, options.blockSize);
 
-std::vector<std::uint8_t> compressHuffman(const std::uint8_t* data, std::size_t size) {
-  const huffman::FreqTable freq = huffman::countFrequencies(data, size);
-  const huffman::LengthTable lengths = huffman::buildLengths(freq);
-  const huffman::CodeTable codes = huffman::buildCanonicalCodes(lengths);
-
-  std::size_t distinct = 0;
-  std::uint64_t payloadBits = 0;
-  for (int symbol = 0; symbol < huffman::kByteAlphabetSize; ++symbol) {
-    const std::uint8_t length = lengths[static_cast<std::size_t>(symbol)];
-    if (length == 0) continue;
-    ++distinct;
-    payloadBits += freq[static_cast<std::size_t>(symbol)] * length;
-  }
-
-  // The exact compressed size is known before encoding anything: the code lengths and
-  // the frequencies are all it depends on. So the "would this even help?" question gets
-  // answered by arithmetic instead of by encoding the file and measuring, which matters
-  // for already-compressed input where the encode would be pure waste.
-  const std::size_t tableSize = 1 + 2 * distinct;
-  const std::size_t total =
-      kHeaderSize + tableSize + static_cast<std::size_t>((payloadBits + 7) / 8);
-  if (total >= kHeaderSize + size) return storeRaw(data, size);
-
-  std::vector<std::uint8_t> out;
-  out.reserve(total);
-  putHeader(out, Method::kHuffman, size);
-
-  out.push_back(static_cast<std::uint8_t>(distinct - 1));  // 1..256 stored as 0..255
-  for (int symbol = 0; symbol < huffman::kByteAlphabetSize; ++symbol) {
-    const std::uint8_t length = lengths[static_cast<std::size_t>(symbol)];
-    if (length == 0) continue;
-    out.push_back(static_cast<std::uint8_t>(symbol));
-    out.push_back(length);
-  }
-
-  BitWriter writer(out);
-  for (std::size_t i = 0; i < size; ++i) {
-    const huffman::Code& code = codes[data[i]];
-    writer.writeBits(code.bits, code.length);
-  }
-  writer.flush();
-  return out;
-}
-
-std::vector<std::uint8_t> decompressHuffman(const std::uint8_t* payload, std::size_t payloadSize,
-                                            std::uint64_t originalSize) {
-  if (payloadSize < 1) throw CorruptInput("missing symbol table");
-
-  const std::size_t distinct = static_cast<std::size_t>(payload[0]) + 1;
-  const std::size_t tableSize = 1 + 2 * distinct;
-  if (payloadSize < tableSize) throw CorruptInput("truncated symbol table");
-
-  huffman::LengthTable lengths(huffman::kByteAlphabetSize, 0);
-  for (std::size_t i = 0; i < distinct; ++i) {
-    const std::uint8_t symbol = payload[1 + 2 * i];
-    const std::uint8_t length = payload[2 + 2 * i];
-    if (length == 0 || length > huffman::kMaxCodeLength) throw CorruptInput("illegal code length");
-    if (lengths[symbol] != 0) throw CorruptInput("duplicate symbol in table");
-    lengths[symbol] = length;
-  }
-
-  const huffman::DecodeTree tree(lengths);
-
-  const std::uint8_t* bits = payload + tableSize;
-  const std::size_t bitsSize = payloadSize - tableSize;
-
-  std::vector<std::uint8_t> out;
-  // Every symbol costs at least one bit, so the payload bounds how many symbols can
-  // possibly follow. Reserving the smaller of the two stops a corrupt header claiming a
-  // 2^64-byte file from turning into an allocation the size of that claim.
-  out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(originalSize, bitsSize * 8)));
-
-  BitReader reader(bits, bitsSize);
-  for (std::uint64_t i = 0; i < originalSize; ++i) {
-    int node = huffman::DecodeTree::kRoot;
-    do {
-      const int next = tree.step(node, reader.readBit());
-      // A missing edge means the bit stream took a path the encoder never wrote. That is
-      // only reachable with a corrupted file -- and it is reachable, because a
-      // length-limited code can leave part of the code space unused.
-      if (next < 0) throw CorruptInput("bit pattern is not a valid code");
-      node = next;
-    } while (!tree.isLeaf(node));
-    out.push_back(static_cast<std::uint8_t>(tree.symbol(node)));
-  }
-  return out;
-}
-
-// ------------------------------------------------------------------- LZ77 (method 2)
-
-constexpr std::size_t kLz77ParamBytes = 2;  // window bits, min match
-
-std::vector<std::uint8_t> compressLz77(const std::uint8_t* data, std::size_t size,
-                                       const lz77::Config& config) {
-  const std::vector<lz77::Token> tokens = lz77::tokenize(data, size, config);
-
-  // As with Huffman, the serialised size is known from the token counts alone, so the
-  // stored-versus-encoded decision costs no extra work.
-  std::size_t literals = 0;
-  std::size_t matches = 0;
-  for (const lz77::Token& token : tokens) {
-    if (token.isMatch()) {
-      ++matches;
-    } else {
-      ++literals;
-    }
-  }
-  const std::size_t flagBytes = (tokens.size() + 7) / 8;
-  const std::size_t total = kHeaderSize + kLz77ParamBytes + flagBytes + literals + 3 * matches;
-  if (total >= kHeaderSize + size) return storeRaw(data, size);
-
-  std::vector<std::uint8_t> out;
-  out.reserve(total);
-  putHeader(out, Method::kLz77, size);
-  out.push_back(static_cast<std::uint8_t>(config.windowBits));
-  out.push_back(static_cast<std::uint8_t>(config.minMatch));
-
-  // Flag bits are written into a byte reserved eight tokens in advance and patched once
-  // the group is complete. The alternative -- two passes, or a separate flag buffer
-  // stitched on afterwards -- costs either time or a second allocation for no benefit.
-  std::size_t flagIndex = 0;
-  std::uint8_t flags = 0;
-  int inGroup = 0;
-
-  for (const lz77::Token& token : tokens) {
-    if (inGroup == 0) {
-      flagIndex = out.size();
-      out.push_back(0);
-      flags = 0;
-    }
-    if (token.isMatch()) {
-      flags |= static_cast<std::uint8_t>(0x80u >> inGroup);
-      const std::uint16_t encodedDistance = static_cast<std::uint16_t>(token.distance - 1);
-      out.push_back(static_cast<std::uint8_t>(encodedDistance & 0xFF));
-      out.push_back(static_cast<std::uint8_t>(encodedDistance >> 8));
-      out.push_back(static_cast<std::uint8_t>(token.length - config.minMatch));
-    } else {
-      out.push_back(token.literal);
-    }
-    if (++inGroup == 8) {
-      out[flagIndex] = flags;
-      inGroup = 0;
-    }
-  }
-  if (inGroup != 0) out[flagIndex] = flags;
-
-  return out;
-}
-
-std::vector<std::uint8_t> decompressLz77(const std::uint8_t* payload, std::size_t payloadSize,
-                                         std::uint64_t originalSize) {
-  if (payloadSize < kLz77ParamBytes) throw CorruptInput("truncated LZ77 parameters");
-  const int windowBits = payload[0];
-  const int minMatch = payload[1];
-  if (windowBits < 8 || windowBits > 16) throw CorruptInput("illegal window size");
-  if (minMatch < 3 || minMatch > 8) throw CorruptInput("illegal minimum match length");
-  const std::size_t windowSize = std::size_t{1} << windowBits;
-
-  std::size_t at = kLz77ParamBytes;
-  const auto take = [&](std::size_t count) {
-    if (payloadSize - at < count) throw CorruptInput("truncated LZ77 token stream");
-    const std::uint8_t* p = payload + at;
-    at += count;
-    return p;
+  // Blocks are compressed in whatever order threads pick them up, but assembled strictly
+  // in index order, so the output does not depend on the thread count or on how the
+  // scheduler interleaved things. That is what lets a 1-thread and an 8-thread run be
+  // compared byte for byte -- and a test asserts exactly that.
+  std::vector<EncodedBlock> encoded(blocks);
+  const auto compressOne = [&](std::size_t index) {
+    const std::size_t offset = index * options.blockSize;
+    const std::size_t length = std::min(options.blockSize, size - offset);
+    encoded[index] = encodeBlock(data + offset, length, options.algorithm, options.lz77);
   };
 
+  const int workers = resolveThreadCount(options.threads);
+  if (workers <= 1) {
+    for (std::size_t index = 0; index < blocks; ++index) compressOne(index);
+  } else {
+    ThreadPool pool(workers);
+    pool.forEach(blocks, compressOne);
+  }
+
+  std::size_t total = kHeaderSize;
+  for (const EncodedBlock& block : encoded) total += kBlockHeaderSize + block.payload.size();
+
   std::vector<std::uint8_t> out;
-  // A match expands at most (minMatch + 255) output bytes from 3 payload bytes, so the
-  // payload bounds the output the same way it does for Huffman. Without this a corrupt
-  // header could ask for a 16-exabyte reservation.
-  const std::uint64_t expansionBound =
-      static_cast<std::uint64_t>(payloadSize) * static_cast<std::uint64_t>(minMatch + 255);
-  out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(originalSize, expansionBound)));
-
-  std::uint8_t flags = 0;
-  int remainingInGroup = 0;
-
-  while (out.size() < originalSize) {
-    if (remainingInGroup == 0) {
-      flags = *take(1);
-      remainingInGroup = 8;
-    }
-    const bool isMatch = (flags & 0x80u) != 0;
-    flags = static_cast<std::uint8_t>(flags << 1);
-    --remainingInGroup;
-
-    if (!isMatch) {
-      out.push_back(*take(1));
-      continue;
-    }
-
-    const std::uint8_t* p = take(3);
-    const std::size_t distance =
-        static_cast<std::size_t>(p[0] | (static_cast<std::uint16_t>(p[1]) << 8)) + 1;
-    const std::size_t length = static_cast<std::size_t>(p[2]) + static_cast<std::size_t>(minMatch);
-
-    if (distance > out.size()) throw CorruptInput("back-reference points before the output");
-    if (distance > windowSize) throw CorruptInput("back-reference exceeds the window");
-    if (out.size() + length > originalSize) throw CorruptInput("token stream overruns the output");
-
-    const std::size_t start = out.size() - distance;
-    // Byte at a time, deliberately. When distance < length the source overlaps the
-    // destination and each copied byte becomes the source for a later one -- which is
-    // exactly how "distance 1, length 200" expresses a 200-byte run. A memcpy would read
-    // the pre-copy contents and get this wrong.
-    for (std::size_t i = 0; i < length; ++i) out.push_back(out[start + i]);
+  out.reserve(total);
+  putHeader(out, Method::kBlocked, size);
+  for (std::size_t index = 0; index < blocks; ++index) {
+    const std::size_t offset = index * options.blockSize;
+    appendBlock(out, std::min(options.blockSize, size - offset), encoded[index]);
   }
   return out;
 }
 
-// -------------------------------------------------------- DEFLATE-style (method 3)
-
-std::vector<std::uint8_t> compressDeflate(const std::uint8_t* data, std::size_t size,
-                                          const lz77::Config& config) {
-  // The budget is the raw size: the container header is paid either way, so the encoding
-  // is only worth doing if the payload alone comes in under the original.
-  const std::vector<std::uint8_t> payload = deflate::encode(data, size, config, size);
-  if (payload.empty()) return storeRaw(data, size);
-
+std::vector<std::uint8_t> decompressBlocked(const std::uint8_t* payload, std::size_t payloadSize,
+                                            std::uint64_t originalSize) {
   std::vector<std::uint8_t> out;
-  out.reserve(kHeaderSize + payload.size());
-  putHeader(out, Method::kDeflate, size);
-  out.insert(out.end(), payload.begin(), payload.end());
+  out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(
+      originalSize, static_cast<std::uint64_t>(payloadSize) * kMaxExpansionPerPayloadByte)));
+
+  std::size_t at = 0;
+  while (out.size() < originalSize) {
+    if (payloadSize - at < kBlockHeaderSize) throw CorruptInput("truncated block header");
+    const std::uint32_t uncompressed = readU32LE(payload + at);
+    const std::uint32_t compressed = readU32LE(payload + at + 4);
+    const auto method = static_cast<Method>(payload[at + 8]);
+    at += kBlockHeaderSize;
+
+    if (payloadSize - at < compressed) throw CorruptInput("truncated block payload");
+    if (uncompressed > originalSize - out.size()) {
+      throw CorruptInput("block overruns the declared output size");
+    }
+
+    const std::vector<std::uint8_t> decoded =
+        decodeBlock(method, payload + at, compressed, uncompressed);
+    if (decoded.size() != uncompressed) throw CorruptInput("block decoded to the wrong size");
+    out.insert(out.end(), decoded.begin(), decoded.end());
+    at += compressed;
+  }
   return out;
+}
+
+// Reads up to `count` bytes; returns how many actually arrived.
+std::size_t readFully(std::istream& in, std::uint8_t* buffer, std::size_t count) {
+  if (count == 0) return 0;
+  in.read(reinterpret_cast<char*>(buffer), static_cast<std::streamsize>(count));
+  return static_cast<std::size_t>(in.gcount());
+}
+
+void writeAll(std::ostream& out, const std::uint8_t* data, std::size_t size) {
+  if (size == 0) return;
+  out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+  if (!out) throw std::runtime_error("write failed");
 }
 
 }  // namespace
 
 std::vector<std::uint8_t> compress(const std::uint8_t* data, std::size_t size,
                                    const Options& options) {
-  if (size == 0) return storeRaw(data, 0);
-  switch (options.algorithm) {
-    case Algorithm::kDeflate:
-      return compressDeflate(data, size, options.lz77);
-    case Algorithm::kLz77:
-      return compressLz77(data, size, options.lz77);
-    case Algorithm::kHuffman:
-    default:
-      return compressHuffman(data, size);
+  if (size == 0) {
+    std::vector<std::uint8_t> out;
+    putHeader(out, Method::kStored, 0);
+    return out;
   }
+  if (!shouldBlock(size, options)) return compressSingleBlock(data, size, options);
+  return compressBlocked(data, size, options);
 }
 
 std::vector<std::uint8_t> decompress(const std::uint8_t* data, std::size_t size) {
@@ -289,19 +171,8 @@ std::vector<std::uint8_t> decompress(const std::uint8_t* data, std::size_t size)
   const std::uint8_t* payload = data + kHeaderSize;
   const std::size_t payloadSize = size - kHeaderSize;
 
-  switch (method) {
-    case Method::kStored:
-      if (payloadSize != originalSize) throw CorruptInput("stored payload size disagrees with header");
-      return std::vector<std::uint8_t>(payload, payload + payloadSize);
-    case Method::kHuffman:
-      return decompressHuffman(payload, payloadSize, originalSize);
-    case Method::kLz77:
-      return decompressLz77(payload, payloadSize, originalSize);
-    case Method::kDeflate:
-      return deflate::decode(payload, payloadSize, originalSize);
-    default:
-      throw CorruptInput("unknown compression method");
-  }
+  if (method == Method::kBlocked) return decompressBlocked(payload, payloadSize, originalSize);
+  return decodeBlock(method, payload, payloadSize, originalSize);
 }
 
 std::vector<std::uint8_t> compress(const std::vector<std::uint8_t>& input, const Options& options) {
@@ -310,6 +181,122 @@ std::vector<std::uint8_t> compress(const std::vector<std::uint8_t>& input, const
 
 std::vector<std::uint8_t> decompress(const std::vector<std::uint8_t>& input) {
   return decompress(input.data(), input.size());
+}
+
+void compressStream(std::istream& in, std::ostream& out, std::uint64_t totalSize,
+                    const Options& options) {
+  const std::size_t blockSize = options.blockSize > 0 ? options.blockSize : kDefaultBlockSize;
+
+  // Small enough to be one block: read it and take the same path the in-memory function
+  // takes, so the two produce identical bytes. Peak memory is one input plus one output,
+  // which is what a single-block encode costs however it is invoked.
+  if (totalSize <= blockSize) {
+    std::vector<std::uint8_t> input(static_cast<std::size_t>(totalSize));
+    if (readFully(in, input.data(), input.size()) != input.size()) {
+      throw std::runtime_error("input ended before the declared size");
+    }
+    const std::vector<std::uint8_t> compressed = compress(input, options);
+    writeAll(out, compressed.data(), compressed.size());
+    return;
+  }
+
+  std::vector<std::uint8_t> header;
+  putHeader(header, Method::kBlocked, totalSize);
+  writeAll(out, header.data(), header.size());
+
+  const std::size_t blocks = blockCountFor(totalSize, blockSize);
+  const int workers = resolveThreadCount(options.threads);
+
+  // A batch of blocks is read, compressed together, then written in order. Memory stays
+  // bounded by (workers x block size) rather than by the file, and the output matches the
+  // sequential path because ordering is imposed at write time rather than left to
+  // whichever thread finished first.
+  const std::size_t batch = workers <= 1 ? 1 : static_cast<std::size_t>(workers);
+
+  std::vector<std::vector<std::uint8_t>> inputs(batch);
+  std::vector<EncodedBlock> encoded(batch);
+  ThreadPool pool(workers > 1 ? workers : 1);
+
+  std::vector<std::uint8_t> framed;
+  std::size_t done = 0;
+  while (done < blocks) {
+    const std::size_t here = std::min(batch, blocks - done);
+    for (std::size_t i = 0; i < here; ++i) {
+      const std::uint64_t offset = static_cast<std::uint64_t>(done + i) * blockSize;
+      const std::size_t length =
+          static_cast<std::size_t>(std::min<std::uint64_t>(blockSize, totalSize - offset));
+      inputs[i].resize(length);
+      if (readFully(in, inputs[i].data(), length) != length) {
+        throw std::runtime_error("input ended before the declared size");
+      }
+    }
+
+    const auto compressOne = [&](std::size_t i) {
+      encoded[i] = encodeBlock(inputs[i].data(), inputs[i].size(), options.algorithm, options.lz77);
+    };
+    if (workers <= 1) {
+      for (std::size_t i = 0; i < here; ++i) compressOne(i);
+    } else {
+      pool.forEach(here, compressOne);
+    }
+
+    for (std::size_t i = 0; i < here; ++i) {
+      framed.clear();
+      appendBlock(framed, inputs[i].size(), encoded[i]);
+      writeAll(out, framed.data(), framed.size());
+    }
+    done += here;
+  }
+}
+
+void decompressStream(std::istream& in, std::ostream& out) {
+  std::uint8_t header[kHeaderSize];
+  if (readFully(in, header, kHeaderSize) != kHeaderSize) {
+    throw CorruptInput("input is shorter than the header");
+  }
+  if (std::memcmp(header, kMagic, sizeof(kMagic)) != 0) throw CorruptInput("bad magic");
+  if (header[4] != kFormatVersion) throw CorruptInput("unsupported format version");
+
+  const auto method = static_cast<Method>(header[5]);
+  const std::uint64_t originalSize = readU64LE(header + 6);
+
+  if (method != Method::kBlocked) {
+    // A single block cannot be decoded incrementally: its Huffman codes and its back
+    // references span the whole payload. Reading it whole is the only option -- and it is
+    // precisely the situation blocking exists to avoid.
+    std::vector<std::uint8_t> payload((std::istreambuf_iterator<char>(in)),
+                                      std::istreambuf_iterator<char>());
+    const std::vector<std::uint8_t> decoded =
+        decodeBlock(method, payload.data(), payload.size(), originalSize);
+    writeAll(out, decoded.data(), decoded.size());
+    return;
+  }
+
+  std::uint64_t produced = 0;
+  std::vector<std::uint8_t> payload;
+  while (produced < originalSize) {
+    std::uint8_t blockHeader[kBlockHeaderSize];
+    if (readFully(in, blockHeader, kBlockHeaderSize) != kBlockHeaderSize) {
+      throw CorruptInput("truncated block header");
+    }
+    const std::uint32_t uncompressed = readU32LE(blockHeader);
+    const std::uint32_t compressed = readU32LE(blockHeader + 4);
+    const auto blockMethod = static_cast<Method>(blockHeader[8]);
+
+    if (uncompressed > originalSize - produced) {
+      throw CorruptInput("block overruns the declared output size");
+    }
+    payload.resize(compressed);
+    if (readFully(in, payload.data(), compressed) != compressed) {
+      throw CorruptInput("truncated block payload");
+    }
+
+    const std::vector<std::uint8_t> decoded =
+        decodeBlock(blockMethod, payload.data(), payload.size(), uncompressed);
+    if (decoded.size() != uncompressed) throw CorruptInput("block decoded to the wrong size");
+    writeAll(out, decoded.data(), decoded.size());
+    produced += uncompressed;
+  }
 }
 
 Method methodOf(const std::vector<std::uint8_t>& compressed) {
@@ -323,6 +310,7 @@ const char* methodName(Method method) {
     case Method::kHuffman: return "huffman";
     case Method::kLz77: return "lz77";
     case Method::kDeflate: return "deflate";
+    case Method::kBlocked: return "blocked";
     default: return "unknown";
   }
 }
