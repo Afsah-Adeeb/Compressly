@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="400" viewBox="0 0 760 400" role="img" aria-label="Compression ratio against block size: samba (21.6 MB)">
+<style>
+  .surface { fill: #fcfcfb; }
+  .grid    { stroke: #e4e3df; stroke-width: 1; }
+  .axis    { stroke: #b8b7b1; stroke-width: 1; }
+  .title   { fill: #0b0b0b; font: 600 15px system-ui, -apple-system, Segoe UI, sans-serif; }
+  .label   { fill: #52514e; font: 12px system-ui, -apple-system, Segoe UI, sans-serif; }
+  .muted   { fill: #7a7975; font: 11px system-ui, -apple-system, Segoe UI, sans-serif; }
+  .series  { stroke: #2a78d6; fill: none; stroke-width: 2; stroke-linejoin: round;
+             stroke-linecap: round; }
+  .dot     { fill: #2a78d6; stroke: #fcfcfb; stroke-width: 2; }
+  .refline { stroke: #b8b7b1; stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+  .callout { fill: #0b0b0b; font: 600 12px system-ui, -apple-system, Segoe UI, sans-serif; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .grid    { stroke: #33322f; }
+    .axis    { stroke: #55534d; }
+    .title   { fill: #ffffff; }
+    .label   { fill: #c3c2b7; }
+    .muted   { fill: #93918a; }
+    .series  { stroke: #3987e5; }
+    .dot     { fill: #3987e5; stroke: #1a1a19; }
+    .refline { stroke: #55534d; }
+    .callout { fill: #ffffff; }
+  }
+</style>
+<rect class="surface" width="760" height="400" rx="6"/>
+<text class="title" x="66" y="24">Compression ratio against block size: samba (21.6 MB)</text>
+<text class="muted" x="66" y="40">Small blocks each pay for their own Huffman tables; large ones stretch one set of trees too far.</text>
+<line class="grid" x1="66" y1="321.1" x2="734" y2="321.1"/>
+<text class="label" x="56.0" y="325.1" text-anchor="end">69%</text>
+<line class="grid" x1="66" y1="275.2" x2="734" y2="275.2"/>
+<text class="label" x="56.0" y="279.2" text-anchor="end">70%</text>
+<line class="grid" x1="66" y1="229.4" x2="734" y2="229.4"/>
+<text class="label" x="56.0" y="233.4" text-anchor="end">71%</text>
+<line class="grid" x1="66" y1="183.5" x2="734" y2="183.5"/>
+<text class="label" x="56.0" y="187.5" text-anchor="end">72%</text>
+<line class="grid" x1="66" y1="137.7" x2="734" y2="137.7"/>
+<text class="label" x="56.0" y="141.7" text-anchor="end">73%</text>
+<line class="grid" x1="66" y1="91.8" x2="734" y2="91.8"/>
+<text class="label" x="56.0" y="95.8" text-anchor="end">74%</text>
+<line class="grid" x1="66" y1="46.0" x2="734" y2="46.0"/>
+<text class="label" x="56.0" y="50.0" text-anchor="end">75%</text>
+<line class="refline" x1="66" y1="131.3" x2="734" y2="131.3"/>
+<text class="muted" x="730.0" y="148.3" text-anchor="end">unblocked, one tree for the whole file: 73.14%</text>
+<line class="axis" x1="66" y1="344" x2="734" y2="344"/>
+<polyline class="series" points="90.7,317.0 214.4,127.1 338.1,77.6 461.9,81.3 585.6,93.7 709.3,123.5"/>
+<circle class="dot" cx="90.7" cy="317.0" r="4.5"/>
+<text class="label" x="90.7" y="364.0" text-anchor="middle">16 KiB</text>
+<circle class="dot" cx="214.4" cy="127.1" r="4.5"/>
+<text class="label" x="214.4" y="364.0" text-anchor="middle">64 KiB</text>
+<circle class="dot" cx="338.1" cy="77.6" r="4.5"/>
+<text class="label" x="338.1" y="364.0" text-anchor="middle">256 KiB</text>
+<circle class="dot" cx="461.9" cy="81.3" r="4.5"/>
+<text class="label" x="461.9" y="364.0" text-anchor="middle">1 MiB</text>
+<circle class="dot" cx="585.6" cy="93.7" r="4.5"/>
+<text class="label" x="585.6" y="364.0" text-anchor="middle">4 MiB</text>
+<circle class="dot" cx="709.3" cy="123.5" r="4.5"/>
+<text class="label" x="709.3" y="364.0" text-anchor="middle">16 MiB</text>
+<text class="label" x="400.0" y="386.0" text-anchor="middle">block size</text>
+<text class="callout" x="338.1" y="65.6" text-anchor="middle">74.31%</text>
+<text class="callout" x="100.7" y="307.0">69.09% &#8212; table overhead dominates</text>
+</svg>
