@@ -488,3 +488,104 @@ selection verified by walking the framing (a mixed file must contain both stored
 deflate blocks); streaming output byte-identical to in-memory across sizes, block sizes,
 thread counts and all three algorithms; all four encoder/decoder path combinations; and
 corrupt block framing — oversized lengths, nested blocks, truncation.
+
+---
+
+## Phase 6 — Benchmark suite
+
+23 files, 349 MB: the full Silesia corpus, plus generated JSON/CSV/log data, plus
+already-compressed media. Harness in `tools/benchmark.py`.
+
+Two things about the method, because they are what make the numbers mean anything:
+
+- **Both compressors are timed identically** — as processes, reading a real file and
+  writing a real file, best of three, with each binary's own measured startup subtracted
+  (10.8 ms for mine, 15.9 ms for gzip). Timing mine in-process and gzip as a subprocess
+  would have handed mine whatever file I/O costs.
+- **The headline throughput comparison is single-threaded.** gzip is single-threaded;
+  comparing it against an 8-thread run measures the core count, not the implementation.
+  The parallel figure is reported in its own column.
+
+Ratios need none of that care — they are exact byte counts.
+
+### Result
+
+| Category | Bytes | Mine | gzip -6 | Difference |
+|---|---|---|---|---|
+| Text and structured data | 162,410,105 | 79.17% | 79.22% | −0.05 |
+| Binary and scientific | 101,102,528 | 55.54% | 55.90% | −0.36 |
+| Already compressed | 85,360,655 | 0.28% | 0.30% | −0.02 |
+| **Whole corpus** | **348,873,288** | **53.02%** | **53.15%** | **−0.13** |
+
+**0.13 points behind gzip across 349 MB**, and ahead of it on 9 of 23 files. All 23
+roundtrips verified byte-identical.
+
+Where each side wins is not random. I come out ahead on `x-ray` (+0.89), `access.log`
+(+0.39), `osdb` (+0.30) and `nci` (+0.15) — large, internally uniform files, where 1 MiB
+blocks give the Huffman trees several fitted sets where gzip is still emitting its own
+blocks on a schedule tuned for streaming. gzip wins on `mozilla` (−0.75), `samba` (−0.49)
+and `mr` (−0.39) — heterogeneous archives, where its adaptive block splitting reacts to
+content changes at the right moment instead of at a fixed boundary, and where its
+compressed code-length tables cost less than my raw ones.
+
+### Throughput: gzip is 1.5–2.7x faster per thread, and that is the honest headline
+
+| File | Mine, 1 thread | gzip -6 | Mine, 8 threads | Mine, decompress |
+|---|---|---|---|---|
+| `dickens` | 9.9 MB/s | 16.8 | 30.4 | 73.0 |
+| `webster` | 17.1 | 30.5 | 67.2 | 36.8 |
+| `mozilla` | 22.2 | 27.7 | 81.6 | 103.1 |
+| `nci` | 39.0 | 89.6 | 131.9 | 223.8 |
+| `data.json` | 50.2 | 134.4 | 175.3 | 242.5 |
+
+Why gzip wins on speed, in the order the time actually goes:
+
+1. **Its longest-match inner loop is hand-optimised C**, comparing two bytes at a time
+   with a pointer-arithmetic trick and an unrolled loop, with assembly variants for
+   several architectures. Mine compares one byte at a time in a plain loop. This is the
+   single largest gap and it is the least interesting one intellectually — it is thirty
+   years of people profiling one function.
+2. **Its Huffman decoder is table-driven.** Mine walks a binary trie one bit per step,
+   which is a dependent pointer chase that cannot be prefetched. A 9-bit lookup table
+   decodes a whole symbol per step. I know what this costs and left it undone on purpose,
+   so the before/after is measurable rather than assumed.
+3. **Its hash insertion is incremental.** zlib rolls the 3-byte hash forward one byte at a
+   time; mine recomputes it. Small but on the hottest path there is.
+4. **Better constants throughout** — buffer sizes, an early-exit `nice_match` threshold,
+   skipping hash insertion inside long matches at low levels.
+
+None of that is algorithmic. Same algorithm, same data structures, same window size; the
+difference is implementation quality on about three functions. That is exactly the
+comparison this project was built to be able to make.
+
+**With 8 threads mine is faster than gzip on 19 of 23 files** — but that is a different
+claim, and it is worth saying plainly which one is which. Per core, gzip wins. Per
+machine, blocking wins. gzip cannot be parallelised without changing its format; mine was
+designed to be.
+
+### Reading the ratio by category
+
+- **Structured text is where compression earns its keep.** JSON at 91.18%, NCI at 90.61%,
+  logs at 88.07%, XML at 87.11%. These formats repeat their own field names on every
+  record, which is the pattern LZ77 was invented for. Prose is much worse — `dickens` at
+  61.91% — because English repeats words but rarely long exact phrases.
+- **Binary data lands in the 26–63% band**, and the spread inside it is about what the
+  bytes mean. `mr` (MRI) at 62.60% has large uniform regions; `sao` (a star catalogue of
+  raw floats) at 26.28% is close to noise, because mantissa bits of measured values are
+  nearly random.
+- **Already-compressed input yields essentially nothing, correctly.** JPEG 4.57%, PNG
+  0.15%, MP4 0.03%, ZIP 0.29%. Every one of these is already entropy-coded, so there is
+  no redundancy left by construction. The important property is that none of them *grew*:
+  the per-block STORED fallback caps the worst case at 9 bytes of framing per block. On
+  random data mine is +14 bytes where gzip is +489.
+- **JPEG at 4.57% is not a paradox.** JPEG entropy-codes the image data but leaves headers,
+  quantisation tables and restart markers in the clear, and that is what the 4.57% is.
+
+### Corpus note
+
+Silesia is the standard compression benchmark set, so these numbers are comparable with
+published results. The generated JSON/CSV/log files and the media files are additions —
+Silesia has no already-compressed category and no machine-generated formats, and the
+brief asks for both. `tools/make_corpus.py` generates the text ones from a fixed seed;
+the media files come from ffmpeg with a detailed source, so they are genuinely
+incompressible rather than trivially so.
