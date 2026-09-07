@@ -39,6 +39,21 @@ endif()
 add_executable(sweep tools/sweep.cpp)
 target_link_libraries(sweep PRIVATE cmpr)
 
+# Shared library with a flat C ABI, loaded by the HTTP service through ctypes. Without it
+# the service would have to spawn the CLI per request, putting ~11 ms of process creation
+# into every latency measurement.
+add_library(cmpr_c SHARED src/capi.cpp)
+target_link_libraries(cmpr_c PRIVATE cmpr)
+set_target_properties(cmpr_c PROPERTIES PREFIX "" OUTPUT_NAME "cmpr")
+if(MINGW)
+  # Self-contained: the service loads this by path and should not also need the toolchain
+  # runtime DLLs to be on PATH.
+  # -static pulls libgcc, libstdc++ and libwinpthread into the DLL itself. Without it the
+  # loader needs the toolchain runtime on PATH, and Python 3.8+ deliberately stopped
+  # searching PATH for a DLL's dependencies -- so the service would fail to load it.
+  target_link_options(cmpr_c PRIVATE -static)
+endif()
+
 add_executable(tests
   tests/testing.cpp
   tests/test_bitio.cpp

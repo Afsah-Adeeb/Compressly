@@ -589,3 +589,115 @@ Silesia has no already-compressed category and no machine-generated formats, and
 brief asks for both. `tools/make_corpus.py` generates the text ones from a fixed seed;
 the media files come from ffmpeg with a detailed source, so they are genuinely
 incompressible rather than trivially so.
+
+---
+
+## Phase 7 — Service and load test
+
+`POST /compress`, `POST /decompress`, `GET /health`, and a small upload page so it can be
+demonstrated in a browser. Python standard library only; the compressor is loaded as a
+shared library through `ctypes`.
+
+### Why a C ABI instead of shelling out to the binary
+
+The obvious wiring — have the service run the CLI per request — costs about 11 ms of
+process creation each time. On a 256 KB payload the compression itself takes 25 ms, so a
+third of every measurement would have been Windows process creation, and the p99 would
+have been describing the operating system rather than this codec.
+
+So the codec is exposed through a flat `extern "C"` API (`src/capi.h`) and built as a
+shared library. Three details that matter:
+
+- **No exception may cross the boundary.** Unwinding into a caller that is not C++ is
+  undefined behaviour, so every entry point catches everything and returns a status code.
+- **The error string is thread-local.** The service runs a thread per request; a shared
+  buffer would hand one request another request's error message, and only under load.
+- **Buffers are `malloc`ed and freed by `cmpr_free`.** Across a DLL boundary the caller
+  may not share this library's allocator, so allocation and release must stay on the same
+  side.
+
+`ctypes` releases the GIL for the duration of a foreign call, so Python request threads
+really do compress simultaneously inside the C++ library. Without that, none of the
+concurrency numbers below would mean anything.
+
+### Throughput and latency, 256 KB payloads
+
+| Clients | req/s | MiB/s | mean ms | p50 | p95 | **p99** |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 40.0 | 10.0 | 25.0 | 24.4 | 27.6 | **33.4** |
+| 2 | 76.0 | 19.0 | 26.4 | 25.6 | 31.9 | **36.1** |
+| 4 | 115.7 | 28.9 | 34.6 | 33.2 | 44.4 | **58.8** |
+| 8 | 133.9 | 33.5 | 59.9 | 56.9 | 80.9 | **127.9** |
+| 16 | 132.3 | 33.1 | 122.0 | 120.3 | 171.6 | **217.4** |
+
+Zero errors throughout. Throughput saturates at about 134 req/s — 33.5 MiB/s — somewhere
+between 4 and 8 clients, which is the four physical cores filling up. Past that,
+throughput is flat and latency grows linearly: 16 clients at 133 req/s implies 120 ms of
+queueing, and the measured mean is 122 ms. Little's law, visible in the table.
+
+### Per-request parallelism helps latency, and only latency
+
+Same test with a 4 MiB payload, so each request spans four blocks and can actually be
+split across threads:
+
+| Clients | 1 thread/request | 8 threads/request | |
+|---:|---:|---:|---|
+| | mean ms / MiB/s | mean ms / MiB/s | |
+| 1 | 442.7 / 9.3 | **187.6 / 21.4** | 2.36x faster |
+| 2 | 484.7 / 16.6 | 269.2 / 30.2 | 1.80x faster |
+| 4 | 665.3 / 23.9 | 511.9 / 32.9 | 1.30x faster |
+| 8 | 1013.9 / 34.4 | 1023.9 / 32.7 | no difference |
+
+The benefit vanishes exactly as concurrency rises, and the reason is worth stating
+plainly: **there is only one pool of cores, and it does not care which layer keeps it
+busy.** At one client, request-level concurrency is 1 and the only way to use four cores
+is to split the request. At eight clients the cores are already saturated by requests, and
+splitting each one further adds coordination for nothing — at 8 clients the parallel
+configuration is marginally *slower*, which is that overhead showing up.
+
+The practical rule this produces: parallelise inside a request when requests are large
+and arrive rarely; parallelise across requests when they are small and arrive constantly.
+A server that does both without thinking gets the second case wrong.
+
+### Block size is a latency dial too
+
+The 256 KB test above showed *no* benefit from threads, for a reason that is not obvious
+from the numbers: 256 KB is smaller than the 1 MiB default block, so every request was a
+single block and there was nothing to parallelise. Dropping the block size to 64 KB for
+that payload:
+
+| Configuration | req/s | mean ms | p99 |
+|---|---:|---:|---:|
+| 1 MiB blocks, 1 thread | 40.0 | 25.0 | 33.4 |
+| 64 KB blocks, 8 threads | **102.6** | **9.8** | **24.6** |
+
+2.5x lower mean latency and 2.6x the throughput at one client. It is not free: 64 KB
+blocks cost `dickens` 2.3 points of ratio (59.61% against 61.91%), because each block pays
+for its own Huffman code length tables.
+
+So block size is doing two different jobs. For a file it trades ratio against memory and
+parallelism, and 1 MiB is optimal. For a latency-sensitive service it trades ratio against
+response time, and the right value depends on the payload size the service actually
+receives. Same parameter, different objective — and a service should set it from its
+traffic, not inherit the file default.
+
+### Decisions
+
+- **Standard library only, no framework.** The rule for this project is that no library
+  does the compression work; the service layer may have dependencies, but four routes over
+  a byte stream do not need a framework, and one would put an install step between a
+  reader and a running demo.
+- **A hand-written load generator rather than wrk or Locust.** wrk has no Windows build
+  and Locust is a large install for what is needed here: N threads issuing keep-alive
+  POSTs and a percentile summary. Either would be a drop-in replacement.
+- **Keep-alive connections and a discarded warm-up.** Without connection reuse a large
+  share of every measurement is TCP setup; without a warm-up the first requests carry
+  connection setup, page faults and a CPU still at its idle clock.
+- **Best-of-three is not used for latency** — every request is recorded. Latency
+  percentiles are the point, and taking a minimum would discard exactly the tail being
+  measured. Throughput benchmarks use the minimum; latency benchmarks must not.
+- **Upload size is capped at 256 MB.** Without a limit, one client decides how much memory
+  the server allocates.
+- **Not deployed.** The brief marks deployment optional, and a free-tier host would add
+  network variance to every number above without adding anything to explain. The service
+  runs locally with one command.
