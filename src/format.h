@@ -25,6 +25,21 @@
 //   +0      1     (number of distinct symbols) - 1
 //   +1      2n    n pairs of (symbol byte, code length byte), ascending by symbol
 //   +1+2n   ..    the bit stream, MSB-first, zero-padded to a byte boundary
+// METHOD 2 -- LZ77:
+//   +0      1     window bits (log2 of the sliding window used by the encoder)
+//   +1      1     minimum match length
+//   +2      ..    LZSS-framed token stream (below)
+//
+// The LZ77 token stream is byte-aligned, in groups of eight tokens. Each group opens
+// with one flag byte whose bits, most significant first, say whether the corresponding
+// token is a match (1) or a literal (0). A literal is one byte; a match is a
+// little-endian uint16 of (distance - 1) followed by one byte of (length - minMatch).
+//
+// Byte alignment is deliberate and temporary. Phase 3 replaces this framing entirely by
+// Huffman-coding the token streams, at which point the flag bits disappear -- a literal
+// and a length share one alphabet, so which of the two a symbol is becomes implicit.
+// Framing it in whole bytes here keeps Phase 2 independently verifiable and makes the
+// improvement Phase 3 delivers directly measurable against it.
 //
 // The symbol table is sparse -- pairs rather than a flat 256-byte array of lengths --
 // because small files are the case where header overhead actually matters. A file of
@@ -52,7 +67,8 @@ class CorruptInput : public std::runtime_error {
 enum class Method : std::uint8_t {
   kStored = 0,
   kHuffman = 1,
-  // Reserved for later phases: 2 = LZ77, 3 = LZ77 + Huffman, 4 = parallel blocks.
+  kLz77 = 2,
+  // Reserved for later phases: 3 = LZ77 + Huffman, 4 = parallel blocks.
 };
 
 }  // namespace cmpr

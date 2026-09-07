@@ -5,6 +5,9 @@
 //   compressor d <in> <out>    decompress
 //   compressor t <in>          roundtrip in memory and report ratio and throughput
 //
+// Add --huffman (default) or --lz77 to pick the algorithm when compressing. Decompression
+// takes no flag: the file records which method produced it.
+//
 // The `t` mode exists because it is the measurement that matters: it verifies
 // correctness and produces the ratio/throughput numbers in one pass, without file I/O
 // timing contaminating the result. It is the seed of the Phase 6 benchmark suite.
@@ -53,15 +56,18 @@ int usage() {
                "usage:\n"
                "  compressor c <in> <out>   compress\n"
                "  compressor d <in> <out>   decompress\n"
-               "  compressor t <in>         roundtrip test, report ratio and throughput\n");
+               "  compressor t <in>         roundtrip test, report ratio and throughput\n"
+               "\n"
+               "  --huffman                 order-0 Huffman (default)\n"
+               "  --lz77                    LZ77 with byte-aligned framing\n");
   return 2;
 }
 
-int runTest(const std::string& path) {
+int runTest(const std::string& path, const cmpr::Options& options) {
   const Bytes input = readFile(path);
 
   auto start = std::chrono::steady_clock::now();
-  const Bytes compressed = cmpr::compress(input);
+  const Bytes compressed = cmpr::compress(input, options);
   const double compressSeconds = secondsSince(start);
 
   start = std::chrono::steady_clock::now();
@@ -77,8 +83,7 @@ int runTest(const std::string& path) {
   std::printf("original     %zu bytes\n", input.size());
   std::printf("compressed   %zu bytes\n", compressed.size());
   std::printf("reduction    %.2f%%\n", ratio);
-  std::printf("method       %s\n",
-              cmpr::methodOf(compressed) == cmpr::Method::kStored ? "stored" : "huffman");
+  std::printf("method       %s\n", cmpr::methodName(cmpr::methodOf(compressed)));
   std::printf("compress     %.2f MB/s (%.3f s)\n",
               megabytesPerSecond(input.size(), compressSeconds), compressSeconds);
   std::printf("decompress   %.2f MB/s (%.3f s)\n",
@@ -90,22 +95,38 @@ int runTest(const std::string& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3) return usage();
-  const std::string mode = argv[1];
+  // Flags are pulled out first so they can appear anywhere on the line; what remains is
+  // positional.
+  cmpr::Options options;
+  std::vector<std::string> args;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--lz77") {
+      options.algorithm = cmpr::Algorithm::kLz77;
+    } else if (arg == "--huffman") {
+      options.algorithm = cmpr::Algorithm::kHuffman;
+    } else {
+      args.push_back(arg);
+    }
+  }
+
+  if (args.size() < 2) return usage();
+  const std::string mode = args[0];
+  const int positional = static_cast<int>(args.size());
 
   try {
-    if ((mode == "c" || mode == "compress") && argc == 4) {
-      const Bytes input = readFile(argv[2]);
-      writeFile(argv[3], cmpr::compress(input));
+    if ((mode == "c" || mode == "compress") && positional == 3) {
+      const Bytes input = readFile(args[1]);
+      writeFile(args[2], cmpr::compress(input, options));
       return 0;
     }
-    if ((mode == "d" || mode == "decompress") && argc == 4) {
-      const Bytes input = readFile(argv[2]);
-      writeFile(argv[3], cmpr::decompress(input));
+    if ((mode == "d" || mode == "decompress") && positional == 3) {
+      const Bytes input = readFile(args[1]);
+      writeFile(args[2], cmpr::decompress(input));
       return 0;
     }
-    if ((mode == "t" || mode == "test") && argc == 3) {
-      return runTest(argv[2]);
+    if ((mode == "t" || mode == "test") && positional == 2) {
+      return runTest(args[1], options);
     }
   } catch (const std::exception& e) {
     std::fprintf(stderr, "error: %s\n", e.what());
