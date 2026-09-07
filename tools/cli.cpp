@@ -5,8 +5,8 @@
 //   compressor d <in> <out>    decompress
 //   compressor t <in>          roundtrip in memory and report ratio and throughput
 //
-// Add --huffman (default) or --lz77 to pick the algorithm when compressing. Decompression
-// takes no flag: the file records which method produced it.
+// Add --deflate (default), --lz77 or --huffman to pick the algorithm when compressing.
+// Decompression takes no flag: the file records which method produced it.
 //
 // The `t` mode exists because it is the measurement that matters: it verifies
 // correctness and produces the ratio/throughput numbers in one pass, without file I/O
@@ -58,8 +58,9 @@ int usage() {
                "  compressor d <in> <out>   decompress\n"
                "  compressor t <in>         roundtrip test, report ratio and throughput\n"
                "\n"
-               "  --huffman                 order-0 Huffman (default)\n"
-               "  --lz77                    LZ77 with byte-aligned framing\n");
+               "  --deflate                 LZ77 then Huffman (default)\n"
+               "  --lz77                    LZ77 alone, byte-aligned framing\n"
+               "  --huffman                 order-0 Huffman alone\n");
   return 2;
 }
 
@@ -103,6 +104,8 @@ int main(int argc, char** argv) {
     const std::string arg = argv[i];
     if (arg == "--lz77") {
       options.algorithm = cmpr::Algorithm::kLz77;
+    } else if (arg == "--deflate") {
+      options.algorithm = cmpr::Algorithm::kDeflate;
     } else if (arg == "--huffman") {
       options.algorithm = cmpr::Algorithm::kHuffman;
     } else {

@@ -15,6 +15,7 @@ add_library(cmpr STATIC
   src/bitio.cpp
   src/huffman.cpp
   src/lz77.cpp
+  src/deflate.cpp
   src/codec.cpp
 )
 target_include_directories(cmpr PUBLIC src)
@@ -34,6 +35,7 @@ add_executable(tests
   tests/test_bitio.cpp
   tests/test_huffman.cpp
   tests/test_lz77.cpp
+  tests/test_deflate.cpp
   tests/test_roundtrip.cpp
 )
 target_link_libraries(tests PRIVATE cmpr)

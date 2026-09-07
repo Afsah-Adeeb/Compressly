@@ -48,6 +48,7 @@ Bytes checkRoundtrip(const Bytes& input, const Options& options) {
 void checkRoundtripEveryAlgorithm(const Bytes& input) {
   checkRoundtrip(input, with(Algorithm::kHuffman));
   checkRoundtrip(input, with(Algorithm::kLz77));
+  checkRoundtrip(input, with(Algorithm::kDeflate));
 }
 
 }  // namespace
@@ -99,7 +100,7 @@ TEST(EveryByteValueOnceEach) {
   Bytes input;
   for (int value = 0; value < 256; ++value) input.push_back(static_cast<std::uint8_t>(value));
 
-  for (Algorithm algorithm : {Algorithm::kHuffman, Algorithm::kLz77}) {
+  for (Algorithm algorithm : {Algorithm::kHuffman, Algorithm::kLz77, Algorithm::kDeflate}) {
     const Bytes compressed = checkRoundtrip(input, with(algorithm));
     CHECK(cmpr::methodOf(compressed) == Method::kStored);
     CHECK_EQ(compressed.size(), input.size() + cmpr::kHeaderSize);
@@ -145,7 +146,7 @@ TEST(IncompressibleRandomDataFallsBackToStored) {
   input.reserve(100000);
   for (int i = 0; i < 100000; ++i) input.push_back(static_cast<std::uint8_t>(dist(rng)));
 
-  for (Algorithm algorithm : {Algorithm::kHuffman, Algorithm::kLz77}) {
+  for (Algorithm algorithm : {Algorithm::kHuffman, Algorithm::kLz77, Algorithm::kDeflate}) {
     const Bytes compressed = checkRoundtrip(input, with(algorithm));
     CHECK(cmpr::methodOf(compressed) == Method::kStored);
     CHECK(compressed.size() <= input.size() + cmpr::kHeaderSize);
@@ -256,7 +257,7 @@ TEST(CorruptHeaderDoesNotCauseAHugeAllocation) {
   // A hostile file can claim any uncompressed size it likes. The decoder must not trust
   // it: bounding the reservation by what the payload could possibly encode keeps this a
   // thrown exception rather than an out-of-memory kill.
-  for (Algorithm algorithm : {Algorithm::kHuffman, Algorithm::kLz77}) {
+  for (Algorithm algorithm : {Algorithm::kHuffman, Algorithm::kLz77, Algorithm::kDeflate}) {
     Bytes compressed = cmpr::compress(bytesOf("abracadabra abracadabra abracadabra"), with(algorithm));
     for (int i = 0; i < 8; ++i) compressed[6 + i] = 0xFF;  // uncompressed size = 2^64 - 1
     CHECK_THROWS(cmpr::decompress(compressed), CorruptInput);

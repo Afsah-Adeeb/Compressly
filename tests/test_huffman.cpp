@@ -27,7 +27,7 @@ std::uint64_t kraftSum(const LengthTable& lengths) {
 void checkDecodesToItself(const LengthTable& lengths) {
   const CodeTable codes = buildCanonicalCodes(lengths);
   const DecodeTree tree(lengths);
-  for (int symbol = 0; symbol < kAlphabetSize; ++symbol) {
+  for (int symbol = 0; symbol < kByteAlphabetSize; ++symbol) {
     const Code& code = codes[static_cast<std::size_t>(symbol)];
     if (code.length == 0) continue;
     int node = DecodeTree::kRoot;
@@ -48,7 +48,7 @@ void checkDecodesToItself(const LengthTable& lengths) {
 }  // namespace
 
 TEST(EmptyInputProducesNoCodes) {
-  const LengthTable lengths = buildLengths(FreqTable{});
+  const LengthTable lengths = buildLengths(FreqTable(kByteAlphabetSize, 0));
   for (std::uint8_t length : lengths) CHECK_EQ(static_cast<int>(length), 0);
 }
 
@@ -56,14 +56,14 @@ TEST(SingleDistinctSymbolGetsAOneBitCode) {
   // The degenerate case: a zero-bit code would leave the decoder looping forever.
   const LengthTable lengths = buildLengths(freqFromString(std::string(1000, 'x')));
   CHECK_EQ(static_cast<int>(lengths['x']), 1);
-  for (int symbol = 0; symbol < kAlphabetSize; ++symbol) {
+  for (int symbol = 0; symbol < kByteAlphabetSize; ++symbol) {
     if (symbol != 'x') CHECK_EQ(static_cast<int>(lengths[static_cast<std::size_t>(symbol)]), 0);
   }
   checkDecodesToItself(lengths);
 }
 
 TEST(MoreFrequentSymbolsGetShorterCodes) {
-  FreqTable freq{};
+  FreqTable freq(kByteAlphabetSize, 0);
   freq['a'] = 100;
   freq['b'] = 10;
   freq['c'] = 1;
@@ -76,7 +76,7 @@ TEST(MoreFrequentSymbolsGetShorterCodes) {
 TEST(BalancedFrequenciesGiveBalancedCodes) {
   // Four equally likely symbols: information-theoretically 2 bits each, and Huffman
   // should find exactly that.
-  FreqTable freq{};
+  FreqTable freq(kByteAlphabetSize, 0);
   for (int symbol = 0; symbol < 4; ++symbol) freq[static_cast<std::size_t>(symbol)] = 25;
   const LengthTable lengths = buildLengths(freq);
   for (int symbol = 0; symbol < 4; ++symbol) {
@@ -95,7 +95,7 @@ TEST(CanonicalCodesAreOrderedByLengthThenSymbol) {
   std::uint64_t previous = 0;
   bool first = true;
   for (int length = 1; length <= kMaxCodeLength; ++length) {
-    for (int symbol = 0; symbol < kAlphabetSize; ++symbol) {
+    for (int symbol = 0; symbol < kByteAlphabetSize; ++symbol) {
       const Code& code = codes[static_cast<std::size_t>(symbol)];
       if (code.length != length) continue;
       const std::uint64_t aligned = static_cast<std::uint64_t>(code.bits)
@@ -109,8 +109,8 @@ TEST(CanonicalCodesAreOrderedByLengthThenSymbol) {
 }
 
 TEST(AllTwoFiftySixSymbolsAreCodeable) {
-  FreqTable freq{};
-  for (int symbol = 0; symbol < kAlphabetSize; ++symbol) {
+  FreqTable freq(kByteAlphabetSize, 0);
+  for (int symbol = 0; symbol < kByteAlphabetSize; ++symbol) {
     freq[static_cast<std::size_t>(symbol)] = static_cast<std::uint64_t>(symbol + 1);
   }
   const LengthTable lengths = buildLengths(freq);
@@ -125,7 +125,7 @@ TEST(FibonacciFrequenciesForceTheLengthLimit) {
   // exactly the next term, so the tree degenerates into a chain and the rarest symbol
   // would get a code as long as the alphabet. This is the input that exercises the Kraft
   // repair path, and it is the reason the limit exists at all.
-  FreqTable freq{};
+  FreqTable freq(kByteAlphabetSize, 0);
   std::uint64_t a = 1;
   std::uint64_t b = 1;
   const int symbols = 40;
@@ -156,11 +156,11 @@ TEST(FibonacciFrequenciesForceTheLengthLimit) {
 TEST(LengthsAreDeterministicAcrossRuns) {
   // Ties in frequency are broken deterministically so the same input always produces the
   // same bytes -- otherwise benchmark runs would not be comparable.
-  FreqTable freq{};
+  FreqTable freq(kByteAlphabetSize, 0);
   for (int symbol = 0; symbol < 16; ++symbol) freq[static_cast<std::size_t>(symbol)] = 7;
   const LengthTable first = buildLengths(freq);
   const LengthTable second = buildLengths(freq);
-  for (int symbol = 0; symbol < kAlphabetSize; ++symbol) {
+  for (int symbol = 0; symbol < kByteAlphabetSize; ++symbol) {
     CHECK_EQ(static_cast<int>(first[static_cast<std::size_t>(symbol)]),
              static_cast<int>(second[static_cast<std::size_t>(symbol)]));
   }

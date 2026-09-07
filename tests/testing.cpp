@@ -20,9 +20,14 @@ void fail(const char* file, int line, const std::string& message) {
   throw std::runtime_error(os.str());
 }
 
-int runAll() {
+int runAll(const std::string& filter) {
   int failures = 0;
+  int selected = 0;
   for (const TestCase& test : registry()) {
+    // Substring match, not an exact name: running one test usually means running the
+    // handful that share a prefix.
+    if (!filter.empty() && std::string(test.name).find(filter) == std::string::npos) continue;
+    ++selected;
     try {
       test.fn();
       std::printf("  pass  %s\n", test.name);
@@ -31,11 +36,17 @@ int runAll() {
       ++failures;
     }
   }
-  std::printf("\n%d/%d passed\n", static_cast<int>(registry().size()) - failures,
-              static_cast<int>(registry().size()));
+  if (selected == 0) {
+    std::printf("no test matched \"%s\"\n", filter.c_str());
+    return 1;
+  }
+  std::printf("\n%d/%d passed\n", selected - failures, selected);
   return failures == 0 ? 0 : 1;
 }
 
 }  // namespace testing
 
-int main() { return testing::runAll(); }
+// An optional argument filters tests by substring: `tests Lz77` runs only those.
+int main(int argc, char** argv) {
+  return testing::runAll(argc > 1 ? argv[1] : "");
+}

@@ -200,3 +200,121 @@ sweep right up to the window edge where ring-buffer aliasing would show, roundtr
 the full config grid (4 window sizes x 3 min-match values x 3 chain depths x lazy on/off,
 on both text and binary), and corrupt LZ77 streams — bad window bits, bad minimum match,
 truncation.
+
+---
+
+## Phase 3 — DEFLATE-style (LZ77 + Huffman)
+
+The token stream from Phase 2, Huffman-coded over two alphabets using RFC 1951's length
+and distance code tables. Structurally what gzip does.
+
+| File | Size | Huffman | LZ77 | **DEFLATE** | gzip -6 | Gap |
+|---|---|---|---|---|---|---|
+| Project source | 92,330 | 36.6% | 62.3% | **71.33%** | 71.54% | 0.21 |
+| compressor.exe | 141,655 | 30.6% | 56.4% | **66.17%** | 66.67% | 0.50 |
+| shell32.dll | 7,947,424 | 19.9% | 42.2% | **53.52%** | 54.19% | 0.67 |
+| Random bytes | 3,000,000 | stored | stored | stored | −0.02% | — |
+
+Throughput: 17–23 MB/s compressing, 88–127 MB/s decompressing.
+
+### What the numbers say
+
+**Within 0.7 points of gzip on every file, and the remaining gap is now fully accounted
+for.** Two separate causes, measured rather than guessed:
+
+*Cause 1 — the code length tables are stored raw.* HLIT/HDIST trim trailing unused
+symbols but the lengths themselves are one byte per symbol: 318 bytes on the source file,
+1.20% of the output. RFC 1951 runs a run-length encoder and then a *third* Huffman code
+over those lengths, which typically gets them to 80–120 bytes. On the source file gzip is
+ahead by 190 bytes and my table overhead is 318 — so that one omission explains the entire
+gap on small files. It matters less as files grow (0.01% on the DLL).
+
+*Cause 2 — one tree for the whole file.* gzip emits multiple blocks, each with its own
+Huffman trees, so the codes track content that changes as the file goes on. I build one
+global tree. Tested directly by compressing shell32.dll in independent blocks:
+
+| Block size | Blocks | Result | vs whole file |
+|---|---|---|---|
+| 64 KiB | 122 | 52.75% | −0.77 |
+| 256 KiB | 31 | 53.79% | +0.27 |
+| 1 MiB | 8 | 53.86% | +0.34 |
+| whole file | 1 | 53.52% | — |
+| gzip -6 | — | 54.19% | +0.67 |
+
+**Splitting into blocks makes compression better, not worse — up to a point.** This
+contradicts what I expected going into Phase 4, and the shape of the curve says why. Two
+forces pull in opposite directions:
+
+- Every block pays for its own code length tables (~320 bytes here). At 64 KiB that is 39
+  KB of pure overhead across 122 blocks, and the ratio gets *worse* by 0.77 points.
+- But a single tree averaged over a whole 7.9 MB DLL fits none of it well. Executable
+  code, resource tables and string blobs have completely different byte distributions.
+  Per-block trees adapt; one global tree compromises.
+
+Past roughly 256 KiB the second effect wins, and 1 MiB blocks recover half the distance to
+gzip. Matches lost at block boundaries are real but tiny at that size — one boundary per
+million bytes.
+
+This reframes Phase 4 and 5. Chunking was going in as a memory-bound necessity with an
+expected ratio cost; it turns out to be a ratio *improvement* at the right block size,
+which also happens to be the thing that makes Phase 5's parallelism possible. Worth
+sweeping block size properly in Phase 4 rather than assuming 64 KiB.
+
+**Decompression dropped from 385 MB/s to 127.** Phase 2's decoder read whole bytes and
+copied; this one walks a Huffman trie one bit at a time for every symbol, which is a
+dependent pointer chase with no prefetching possible. Still faster than the Phase 1 decoder
+(48 MB/s) because matches expand many output bytes per symbol decoded. The lookup-table
+decoder is now clearly the highest-value optimisation available, and it is deliberately
+still on the shelf so the before/after can be measured.
+
+**Compression speed barely moved** (18.9 → 18.1 MB/s on source). Match finding dominates
+and always did; adding two Huffman passes over the token stream is noise against walking
+hash chains.
+
+### What each knob does now
+
+Same sweep, run on the combined codec. The curves keep their shape but compress:
+
+| Window | Reduction | | Chain | Reduction | Comp MB/s |
+|---|---|---|---|---|---|
+| 256 B | 53.93% | | 1 | 65.14% | 57.7 |
+| 1 KiB | 61.57% | | 4 | 68.70% | 53.2 |
+| 4 KiB | 66.52% | | 16 | 70.54% | 27.5 |
+| 32 KiB | 71.33% | | 128 | 71.33% | 19.8 |
+| | | | 4096 | 71.42% | 11.8 |
+
+Note how much the Huffman stage flattens the search-depth curve. In Phase 2 going from
+chain 1 to chain 128 bought 13.6 points; here it buys 6.2. Entropy coding recovers a good
+part of what a lazier search gives up, because the shorter matches it settles for are
+themselves more predictable and get shorter codes. That makes fast settings more
+attractive than the Phase 2 numbers suggested.
+
+### Decisions made in this phase
+
+- **RFC 1951's exact length and distance code tables**, not a scheme of my own. The
+  comparison against gzip becomes about implementation rather than format, and the later
+  bit-compatibility goal needs them regardless.
+- **Literals and lengths share one alphabet.** This is what deletes Phase 2's flag bits:
+  which kind of thing a symbol is has become implicit in the symbol, and the tree learns
+  this file's literal-to-match ratio for free.
+- **Symbol 256 (end-of-block) reserved but never emitted.** The container header carries
+  the uncompressed size. Keeping the slot costs nothing — an unused symbol gets no code —
+  and keeps the numbering identical to RFC 1951.
+- **Extra bits written raw, not entropy coded.** Within a length or distance range the
+  values are close to uniform, so there is nothing for a Huffman code to exploit.
+- **minMatch pinned to 3 and windowBits to 15**, because the code tables fix the ranges at
+  [3, 258] and [1, 32768]. Justified by the Phase 2 sweep, where minMatch 3 and 4 were
+  within 0.02% and a 64 KiB window bought 1.6 points for a quarter of the throughput.
+- **Code lengths stored one byte per symbol**, knowing it costs ~1.2% on small files. It
+  is measured and quantified above rather than assumed away; encoding them properly is the
+  single highest-ratio improvement left, and it belongs after Phase 4 has settled the
+  block structure it would be applied to.
+
+### Correctness
+
+53 tests. New: exhaustive verification of both code tables — all 258 lengths and all
+32,768 distances checked for range, monotonicity, extra-bit width, and exact
+reversibility, because a transcription typo in a constant table corrupts one narrow range
+of values that a roundtrip test would only catch by luck. Plus matches at the table
+extremes through the full encoder, 200 KB runs, config rejection for settings the tables
+cannot express, and corrupt HLIT/HDIST/window fields.

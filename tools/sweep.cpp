@@ -63,7 +63,8 @@ Result measure(const Bytes& input, const cmpr::Options& options) {
   Result result;
 
   cmpr::lz77::Stats stats;
-  if (options.algorithm == cmpr::Algorithm::kLz77) {
+  if (options.algorithm == cmpr::Algorithm::kLz77 ||
+      options.algorithm == cmpr::Algorithm::kDeflate) {
     cmpr::lz77::tokenize(input.data(), input.size(), options.lz77, &stats);
     result.averageMatchLength = stats.averageMatchLength();
     result.matchedFraction = input.empty() ? 0.0
@@ -108,22 +109,28 @@ void sweepFile(const std::string& path) {
   std::printf("\n%s  (%zu bytes)\n", path.c_str(), input.size());
   printHeader();
 
-  cmpr::Options huffman;
-  huffman.algorithm = cmpr::Algorithm::kHuffman;
-  printRow("huffman (phase 1)", input.size(), measure(input, huffman));
+  const auto plain = [&](cmpr::Algorithm algorithm) {
+    cmpr::Options options;
+    options.algorithm = algorithm;
+    return options;
+  };
+  printRow("huffman (phase 1)", input.size(), measure(input, plain(cmpr::Algorithm::kHuffman)));
+  printRow("lz77 (phase 2)", input.size(), measure(input, plain(cmpr::Algorithm::kLz77)));
 
+  // The knob sweeps run on the combined codec, since that is what ships. Its distance
+  // code table stops at 32768, so the window sweep stops at 15 rather than 16.
   const cmpr::lz77::Config defaults;
   const auto lz77With = [&](const cmpr::lz77::Config& config) {
     cmpr::Options options;
-    options.algorithm = cmpr::Algorithm::kLz77;
+    options.algorithm = cmpr::Algorithm::kDeflate;
     options.lz77 = config;
     return options;
   };
 
-  printRow("lz77 (defaults)", input.size(), measure(input, lz77With(defaults)));
+  printRow("deflate (defaults)", input.size(), measure(input, lz77With(defaults)));
 
   std::printf("\n  -- window size --------------------------------------------------------\n");
-  for (int windowBits = 8; windowBits <= 16; ++windowBits) {
+  for (int windowBits = 8; windowBits <= cmpr::deflate::kMaxWindowBits; ++windowBits) {
     cmpr::lz77::Config config = defaults;
     config.windowBits = windowBits;
     const std::size_t kib = (std::size_t{1} << windowBits) / 1024;
@@ -132,13 +139,10 @@ void sweepFile(const std::string& path) {
         (kib == 0 ? std::to_string(std::size_t{1} << windowBits) + " B" : std::to_string(kib) + " KiB") + ")";
     printRow(label, input.size(), measure(input, lz77With(config)));
   }
-
-  std::printf("\n  -- minimum match length -----------------------------------------------\n");
-  for (int minMatch = 3; minMatch <= 8; ++minMatch) {
-    cmpr::lz77::Config config = defaults;
-    config.minMatch = minMatch;
-    printRow("minMatch " + std::to_string(minMatch), input.size(), measure(input, lz77With(config)));
-  }
+  // No minimum-match sweep here: DEFLATE's length code table fixes the match range at
+  // [3, 258]. Phase 2 measured that knob on the standalone LZ77 codec, where 3 and 4 came
+  // out within 0.02% and everything longer was worse, so being pinned to 3 costs nothing
+  // measurable. NOTES.md has the table.
 
   std::printf("\n  -- search depth (chain length) ----------------------------------------\n");
   for (int chain : {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096}) {

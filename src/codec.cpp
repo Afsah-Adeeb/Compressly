@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "bitio.h"
+#include "deflate.h"
 #include "huffman.h"
 
 namespace cmpr {
@@ -43,7 +44,7 @@ std::vector<std::uint8_t> compressHuffman(const std::uint8_t* data, std::size_t 
 
   std::size_t distinct = 0;
   std::uint64_t payloadBits = 0;
-  for (int symbol = 0; symbol < huffman::kAlphabetSize; ++symbol) {
+  for (int symbol = 0; symbol < huffman::kByteAlphabetSize; ++symbol) {
     const std::uint8_t length = lengths[static_cast<std::size_t>(symbol)];
     if (length == 0) continue;
     ++distinct;
@@ -64,7 +65,7 @@ std::vector<std::uint8_t> compressHuffman(const std::uint8_t* data, std::size_t 
   putHeader(out, Method::kHuffman, size);
 
   out.push_back(static_cast<std::uint8_t>(distinct - 1));  // 1..256 stored as 0..255
-  for (int symbol = 0; symbol < huffman::kAlphabetSize; ++symbol) {
+  for (int symbol = 0; symbol < huffman::kByteAlphabetSize; ++symbol) {
     const std::uint8_t length = lengths[static_cast<std::size_t>(symbol)];
     if (length == 0) continue;
     out.push_back(static_cast<std::uint8_t>(symbol));
@@ -88,7 +89,7 @@ std::vector<std::uint8_t> decompressHuffman(const std::uint8_t* payload, std::si
   const std::size_t tableSize = 1 + 2 * distinct;
   if (payloadSize < tableSize) throw CorruptInput("truncated symbol table");
 
-  huffman::LengthTable lengths{};
+  huffman::LengthTable lengths(huffman::kByteAlphabetSize, 0);
   for (std::size_t i = 0; i < distinct; ++i) {
     const std::uint8_t symbol = payload[1 + 2 * i];
     const std::uint8_t length = payload[2 + 2 * i];
@@ -246,12 +247,30 @@ std::vector<std::uint8_t> decompressLz77(const std::uint8_t* payload, std::size_
   return out;
 }
 
+// -------------------------------------------------------- DEFLATE-style (method 3)
+
+std::vector<std::uint8_t> compressDeflate(const std::uint8_t* data, std::size_t size,
+                                          const lz77::Config& config) {
+  // The budget is the raw size: the container header is paid either way, so the encoding
+  // is only worth doing if the payload alone comes in under the original.
+  const std::vector<std::uint8_t> payload = deflate::encode(data, size, config, size);
+  if (payload.empty()) return storeRaw(data, size);
+
+  std::vector<std::uint8_t> out;
+  out.reserve(kHeaderSize + payload.size());
+  putHeader(out, Method::kDeflate, size);
+  out.insert(out.end(), payload.begin(), payload.end());
+  return out;
+}
+
 }  // namespace
 
 std::vector<std::uint8_t> compress(const std::uint8_t* data, std::size_t size,
                                    const Options& options) {
   if (size == 0) return storeRaw(data, 0);
   switch (options.algorithm) {
+    case Algorithm::kDeflate:
+      return compressDeflate(data, size, options.lz77);
     case Algorithm::kLz77:
       return compressLz77(data, size, options.lz77);
     case Algorithm::kHuffman:
@@ -278,6 +297,8 @@ std::vector<std::uint8_t> decompress(const std::uint8_t* data, std::size_t size)
       return decompressHuffman(payload, payloadSize, originalSize);
     case Method::kLz77:
       return decompressLz77(payload, payloadSize, originalSize);
+    case Method::kDeflate:
+      return deflate::decode(payload, payloadSize, originalSize);
     default:
       throw CorruptInput("unknown compression method");
   }
@@ -301,6 +322,7 @@ const char* methodName(Method method) {
     case Method::kStored: return "stored";
     case Method::kHuffman: return "huffman";
     case Method::kLz77: return "lz77";
+    case Method::kDeflate: return "deflate";
     default: return "unknown";
   }
 }

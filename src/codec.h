@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "deflate.h"
 #include "format.h"
 #include "lz77.h"
 
@@ -14,13 +15,13 @@ namespace cmpr {
 enum class Algorithm {
   kHuffman,  // Phase 1: order-0 Huffman coding
   kLz77,     // Phase 2: LZ77 with byte-aligned LZSS framing
-  // Phase 3 adds the combination of the two, which is what gzip actually does.
+  kDeflate,  // Phase 3: LZ77 then Huffman -- structurally what gzip does
 };
 
 struct Options {
-  // Defaults to Huffman so existing callers keep their behaviour. Phase 3 will make the
-  // combined codec the default, once there is a measurement showing it deserves to be.
-  Algorithm algorithm = Algorithm::kHuffman;
+  // Defaults to the combined codec: it beats the other two on every input measured, and
+  // the earlier ones are kept reachable because the comparison between them is the point.
+  Algorithm algorithm = Algorithm::kDeflate;
   lz77::Config lz77;
 };
 

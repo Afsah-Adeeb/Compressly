@@ -1,6 +1,7 @@
 #include "huffman.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <queue>
 
@@ -8,7 +9,7 @@ namespace cmpr {
 namespace huffman {
 
 FreqTable countFrequencies(const std::uint8_t* data, std::size_t size) {
-  FreqTable freq{};
+  FreqTable freq(kByteAlphabetSize, 0);
   for (std::size_t i = 0; i < size; ++i) ++freq[data[i]];
   return freq;
 }
@@ -71,7 +72,8 @@ void enforceLengthLimit(std::array<std::uint32_t, kMaxCodeLength + 1>& count) {
   while (kraft > limit) {
     // Find the deepest level short of the limit that still has a leaf to push down.
     // One always exists here: if every leaf were already at kMaxCodeLength the Kraft sum
-    // would equal the number of symbols (at most 256), far under the limit.
+    // would equal the number of symbols, which is under the limit for any alphabet that
+    // fits in kMaxCodeLength bits at all.
     int length = kMaxCodeLength - 1;
     while (count[static_cast<std::size_t>(length)] == 0) --length;
     assert(length >= 1);
@@ -85,10 +87,11 @@ void enforceLengthLimit(std::array<std::uint32_t, kMaxCodeLength + 1>& count) {
 }  // namespace
 
 LengthTable buildLengths(const FreqTable& freq) {
-  LengthTable lengths{};
+  const int alphabetSize = static_cast<int>(freq.size());
+  LengthTable lengths(freq.size(), 0);
 
   std::vector<int> present;
-  for (int symbol = 0; symbol < kAlphabetSize; ++symbol) {
+  for (int symbol = 0; symbol < alphabetSize; ++symbol) {
     if (freq[static_cast<std::size_t>(symbol)] != 0) present.push_back(symbol);
   }
 
@@ -160,6 +163,7 @@ LengthTable buildLengths(const FreqTable& freq) {
 }
 
 CodeTable buildCanonicalCodes(const LengthTable& lengths) {
+  const int alphabetSize = static_cast<int>(lengths.size());
   std::array<std::uint32_t, kMaxCodeLength + 1> count{};
   for (std::uint8_t length : lengths) {
     if (length != 0) ++count[length];
@@ -176,8 +180,8 @@ CodeTable buildCanonicalCodes(const LengthTable& lengths) {
     nextCode[static_cast<std::size_t>(length)] = code;
   }
 
-  CodeTable codes{};
-  for (int symbol = 0; symbol < kAlphabetSize; ++symbol) {
+  CodeTable codes(lengths.size());
+  for (int symbol = 0; symbol < alphabetSize; ++symbol) {
     const std::uint8_t length = lengths[static_cast<std::size_t>(symbol)];
     if (length == 0) continue;
     codes[static_cast<std::size_t>(symbol)] = Code{nextCode[length]++, length};
@@ -189,7 +193,7 @@ DecodeTree::DecodeTree(const LengthTable& lengths) {
   nodes_.push_back(Node{});  // root
 
   const CodeTable codes = buildCanonicalCodes(lengths);
-  for (int symbol = 0; symbol < kAlphabetSize; ++symbol) {
+  for (int symbol = 0; symbol < static_cast<int>(lengths.size()); ++symbol) {
     const Code& code = codes[static_cast<std::size_t>(symbol)];
     if (code.length == 0) continue;
 

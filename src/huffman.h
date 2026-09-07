@@ -1,6 +1,6 @@
 #pragma once
 //
-// Canonical Huffman coding over the 256-symbol byte alphabet.
+// Canonical Huffman coding over an arbitrary alphabet.
 //
 // Two things here are worth knowing before reading the implementation:
 //
@@ -17,36 +17,44 @@
 //    kMaxCodeLength, which costs a negligible amount of compression ratio and is again
 //    what real implementations do.
 //
-#include <array>
+// The alphabet size is a runtime property of the tables passed in, not a constant. Phase
+// 1 needed only the 256 byte values; Phase 3 codes a 286-symbol literal/length alphabet
+// and a 30-symbol distance alphabet with the same machinery.
+//
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace cmpr {
 namespace huffman {
 
-constexpr int kAlphabetSize = 256;
+// The alphabet of raw byte values, used by the order-0 codec.
+constexpr int kByteAlphabetSize = 256;
 
-// 15 bits matches DEFLATE. It is comfortably enough that no realistic input gets near
-// it: reaching depth L needs roughly fib(L+2) symbols, so depth 15 requires an
-// adversarially constructed frequency distribution, never natural data.
+// 15 bits matches DEFLATE. Reaching depth L needs roughly fib(L+2) symbols, so depth 15
+// takes an adversarially skewed distribution rather than natural data -- but "rather
+// than" is not "never", which is why the limiter exists and is tested.
 constexpr int kMaxCodeLength = 15;
 
-using FreqTable = std::array<std::uint64_t, kAlphabetSize>;
+// One entry per symbol; the alphabet size is the vector's size.
+using FreqTable = std::vector<std::uint64_t>;
 
 // Code length per symbol. 0 means "symbol does not occur in the input".
-using LengthTable = std::array<std::uint8_t, kAlphabetSize>;
+using LengthTable = std::vector<std::uint8_t>;
 
 struct Code {
-  std::uint32_t bits = 0;  // right-aligned; only the low `length` bits are meaningful
-  std::uint8_t length = 0; // 0 for absent symbols
+  std::uint32_t bits = 0;   // right-aligned; only the low `length` bits are meaningful
+  std::uint8_t length = 0;  // 0 for absent symbols
 };
-using CodeTable = std::array<Code, kAlphabetSize>;
+using CodeTable = std::vector<Code>;
 
+// Byte frequencies over `data`. Always returns kByteAlphabetSize entries.
 FreqTable countFrequencies(const std::uint8_t* data, std::size_t size);
 
 // Builds the Huffman tree, derives a code length per symbol, and enforces
 // kMaxCodeLength. Guarantees: every symbol with a non-zero frequency gets a length in
-// [1, kMaxCodeLength]; every symbol with zero frequency gets 0.
+// [1, kMaxCodeLength]; every symbol with zero frequency gets 0. The result has the same
+// size as `freq`.
 LengthTable buildLengths(const FreqTable& freq);
 
 // Assigns the canonical code for each length, using the RFC 1951 procedure: codes are

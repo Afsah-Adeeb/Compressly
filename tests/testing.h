@@ -26,7 +26,8 @@ struct Registrar {
 
 [[noreturn]] void fail(const char* file, int line, const std::string& message);
 
-int runAll();
+// Runs every registered test, or only those whose name contains `filter`.
+int runAll(const std::string& filter = "");
 
 }  // namespace testing
 

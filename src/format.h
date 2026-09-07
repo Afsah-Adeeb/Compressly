@@ -30,7 +30,20 @@
 //   +1      1     minimum match length
 //   +2      ..    LZSS-framed token stream (below)
 //
-// The LZ77 token stream is byte-aligned, in groups of eight tokens. Each group opens
+// METHOD 3 -- DEFLATE-STYLE (LZ77 + Huffman):
+//   +0      1     window bits
+//   +1      2     HLIT:  number of literal/length code lengths stored (little-endian)
+//   +3      1     HDIST: number of distance code lengths stored
+//   +4      HLIT  literal/length code lengths, one byte per symbol
+//   +..     HDIST distance code lengths, one byte per symbol
+//   +..     ..    the bit stream, MSB-first, zero-padded to a byte boundary
+//
+// Trailing zero code lengths are dropped, which is what HLIT/HDIST are for. The lengths
+// themselves are stored one per byte rather than compressed; RFC 1951 runs a third
+// Huffman code over them and saves a couple of hundred bytes per block. That is a
+// measured decision recorded in NOTES.md, not an oversight.
+//
+// The LZ77 token stream (method 2) is byte-aligned, in groups of eight tokens. Each group opens
 // with one flag byte whose bits, most significant first, say whether the corresponding
 // token is a match (1) or a literal (0). A literal is one byte; a match is a
 // little-endian uint16 of (distance - 1) followed by one byte of (length - minMatch).
@@ -68,7 +81,8 @@ enum class Method : std::uint8_t {
   kStored = 0,
   kHuffman = 1,
   kLz77 = 2,
-  // Reserved for later phases: 3 = LZ77 + Huffman, 4 = parallel blocks.
+  kDeflate = 3,
+  // Reserved for later phases: 4 = parallel blocks.
 };
 
 }  // namespace cmpr
