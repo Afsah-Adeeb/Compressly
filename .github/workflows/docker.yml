@@ -1,0 +1,48 @@
+# Builds the deployment image and proves it actually serves a correct roundtrip.
+#
+# The unit tests (ci.yml, if added later) cover the codec. This job covers the
+# thing they can't: that the Dockerfile compiles libcmpr.so on Debian, that the
+# slim runtime image can load it, and that /compress -> /decompress returns the
+# original bytes over HTTP. A host deploy that fails here would fail there too,
+# only slower and with worse logs.
+name: docker
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t compressor:ci .
+
+      - name: Run container
+        run: |
+          docker run -d --name cmpr -p 8080:8080 compressor:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://localhost:8080/health
+
+      - name: Roundtrip over HTTP
+        run: |
+          # A payload with enough repetition that compression actually engages,
+          # so this also catches a library that loads but computes garbage.
+          python3 -c "import sys; sys.stdout.buffer.write((b'the quick brown fox. ' * 4000))" > original.bin
+          curl -fsS --data-binary @original.bin http://localhost:8080/compress   > compressed.bin
+          curl -fsS --data-binary @compressed.bin http://localhost:8080/decompress > restored.bin
+          cmp original.bin restored.bin
+          orig=$(wc -c < original.bin); comp=$(wc -c < compressed.bin)
+          echo "roundtrip ok: $orig -> $comp bytes"
+          test "$comp" -lt "$orig"
+
+      - name: Container logs
+        if: always()
+        run: docker logs cmpr
