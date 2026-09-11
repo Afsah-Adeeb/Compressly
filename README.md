@@ -1,5 +1,8 @@
 # Compressly — a DEFLATE-style compressor, written from scratch
 
+**[Try it live →](https://compressor-203304654806.us-central1.run.app)** — drop a file in
+the browser and watch it compress against the real C++ library.
+
 LZ77 followed by canonical Huffman coding — structurally the same algorithm gzip uses —
 implemented in C++17 with no compression libraries, then benchmarked against gzip on
 349 MB across 23 file types.
@@ -16,6 +19,7 @@ of 23 files.
 
 ## Contents
 
+- [Live demo](https://compressor-203304654806.us-central1.run.app)
 - [Quick start](#quick-start)
 - [Benchmark: Compressly vs gzip](#benchmark-compressly-vs-gzip)
 - [Why gzip is faster per thread](#why-gzip-is-faster-per-thread)
