@@ -4,8 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-A DEFLATE-style compressor (LZ77 → Huffman) written from scratch, built as an SDE
-portfolio piece. All eight planned phases are complete; see `README.md` for the results
+**Compressly** — a DEFLATE-style compressor (LZ77 → Huffman) written from scratch, built as
+an SDE portfolio piece. The name is the project; `cmpr` remains the short form used
+throughout the code (the namespace, `cmpr.py`, the `cmpr_c` target, the `.cmpr` extension)
+and is not to be renamed — that would be churn across every file for no gain. All eight planned phases are complete; see `README.md` for the results
 and `NOTES.md` for the measurement log. Two consequences shape every decision here:
 
 - **No libraries do the core work.** Hand-rolled data structures are the point. Libraries

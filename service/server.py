@@ -48,6 +48,20 @@ MAX_UPLOAD = 256 * 1024 * 1024
 # per request would put a disk hit inside the latency the load test measures.
 INDEX_PAGE = (Path(__file__).resolve().parent / "index.html").read_text(encoding="utf-8")
 
+_METHOD_NAMES = {0: "stored", 1: "huffman", 2: "lz77", 3: "deflate-style", 4: "blocked"}
+
+
+def method_name(container: bytes) -> str:
+    """Name of the method recorded in a container header.
+
+    Byte 5 is the method field -- the layout is documented in src/format.h. Reading it
+    here rather than in the browser keeps knowledge of the format on this side of the
+    wire; the page only prints the string it is handed.
+    """
+    if len(container) < 6 or container[:4] != b"CMPR":
+        return "unknown"
+    return _METHOD_NAMES.get(container[5], f"method {container[5]}")
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "cmpr/1.0"
@@ -140,6 +154,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Original-Bytes", str(len(body)))
         self.send_header("X-Result-Bytes", str(len(result)))
         self.send_header("X-Elapsed-Ms", f"{elapsed * 1000:.2f}")
+        # Whichever side of this exchange is the compressed container, that is the one
+        # carrying the method the encoder settled on.
+        self.send_header("X-Method", method_name(result if route == "/compress" else body))
         self.end_headers()
         self.wfile.write(result)
 

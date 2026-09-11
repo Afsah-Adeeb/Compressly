@@ -1,4 +1,4 @@
-# cmpr — a DEFLATE-style compressor, written from scratch
+# Compressly — a DEFLATE-style compressor, written from scratch
 
 LZ77 followed by canonical Huffman coding — structurally the same algorithm gzip uses —
 implemented in C++17 with no compression libraries, then benchmarked against gzip on
@@ -17,7 +17,7 @@ of 23 files.
 ## Contents
 
 - [Quick start](#quick-start)
-- [Benchmark: cmpr vs gzip](#benchmark-cmpr-vs-gzip)
+- [Benchmark: Compressly vs gzip](#benchmark-compressly-vs-gzip)
 - [Why gzip is faster per thread](#why-gzip-is-faster-per-thread)
 - [Parallel speedup](#parallel-speedup)
 - [Block size: the parameter that does three jobs](#block-size-the-parameter-that-does-three-jobs)
@@ -64,7 +64,10 @@ python service/loadtest.py --payload corpus/dickens --clients 1,2,4,8,16
 
 ---
 
-## Benchmark: cmpr vs gzip
+## Benchmark: Compressly vs gzip
+
+The tables below label it `cmpr` — the short name it uses in code, and the extension it
+writes.
 
 23 files, 348,873,288 bytes: the complete [Silesia
 corpus](https://sun.aei.polsl.pl//~sdeor/index.php?page=silesia), plus generated
@@ -117,7 +120,7 @@ its own column.
 | `random.bin` | Uniform random bytes | 3,000,000 | −0.00% | −0.02% | **+0.01** | 37.2 | 41.2 | 68.2 | 271.1 |
 | **total** | | **85,360,655** | **0.28%** | **0.30%** | **−0.02** | | | | |
 
-**Whole corpus: cmpr 53.02%, gzip -6 53.15%, a difference of −0.13 points.** All 23
+**Whole corpus: Compressly 53.02%, gzip -6 53.15%, a difference of −0.13 points.** All 23
 roundtrips verified byte-identical by SHA-256.
 
 ### Reading the ratios
@@ -136,12 +139,12 @@ are close to random.
 files is already entropy-coded, so there is no redundancy left by construction. The
 property that matters is that none of them *grew*: a block the encoder cannot shrink is
 stored verbatim, capping the worst case at 9 bytes of framing per block. On random data
-cmpr adds 14 bytes where gzip adds 489.
+Compressly adds 14 bytes where gzip adds 489.
 
 **JPEG at 4.57% is not a paradox.** JPEG entropy-codes the image data but leaves headers,
 quantisation tables and restart markers in the clear. That is what the 4.57% is.
 
-**Where each side wins is not random.** cmpr comes out ahead on `x-ray` (+0.89),
+**Where each side wins is not random.** Compressly comes out ahead on `x-ray` (+0.89),
 `access.log` (+0.39) and `osdb` (+0.30) — large, internally uniform files, where 1 MiB
 blocks give the Huffman trees several well-fitted sets. gzip wins on `mozilla` (−0.75) and
 `samba` (−0.49) — heterogeneous archives, where its adaptive block splitting reacts to
@@ -172,7 +175,7 @@ are specific rather than mysterious. In the order the time actually goes:
 The difference is implementation quality in about three functions — which is exactly the
 comparison this project was built to be able to make.
 
-With 8 threads cmpr is faster than gzip on 19 of 23 files. That is a different claim, and
+With 8 threads Compressly is faster than gzip on 19 of 23 files. That is a different claim, and
 worth stating as one: **per core, gzip wins; per machine, blocking wins.** gzip cannot be
 parallelised without changing its format. This was designed so it could be.
 

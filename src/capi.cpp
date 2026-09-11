@@ -101,6 +101,6 @@ void cmpr_free(unsigned char* buffer) { std::free(buffer); }
 
 const char* cmpr_last_error(void) { return g_lastError.c_str(); }
 
-const char* cmpr_version(void) { return "cmpr 1.0 (LZ77 + canonical Huffman)"; }
+const char* cmpr_version(void) { return "Compressly 1.0"; }
 
 }  // extern "C"
