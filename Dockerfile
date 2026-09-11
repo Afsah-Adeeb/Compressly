@@ -16,6 +16,12 @@ COPY src ./src
 COPY tools ./tools
 COPY tests ./tests
 
+# Cloud Build's tar-based context doesn't preserve mtime ordering, so Ninja sees its
+# own just-generated build.ninja as older than the sources that produced it and
+# re-runs CMake forever ("manifest still dirty after 100 tries"). Stamping every
+# copied file to the same current time removes the ordering Ninja was confused by.
+RUN find . -exec touch {} +
+
 # Only the shared library is needed to serve requests -- skip the CLI, sweep and
 # test targets so the container build doesn't pay for work the service never uses.
 RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
