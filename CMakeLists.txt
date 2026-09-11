@@ -20,6 +20,11 @@ add_library(cmpr STATIC
   src/threadpool.cpp
   src/codec.cpp
 )
+# cmpr_c below links this static library into a shared object, which requires every
+# object file in it to be position-independent. Setting it here (rather than only on
+# cmpr_c) keeps the flag next to the library it actually applies to, and it's a no-op
+# for the compressor/tests/sweep executables that also link cmpr.
+set_target_properties(cmpr PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(cmpr PUBLIC src)
 target_compile_options(cmpr PRIVATE -Wall -Wextra -Wpedantic)
 
