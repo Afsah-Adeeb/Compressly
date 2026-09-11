@@ -31,7 +31,11 @@ FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 COPY service ./service
-COPY --from=build /src/build/libcmpr.so ./build/libcmpr.so
+# cmpr_c's PREFIX property is cleared so cmpr.dll (Windows never adds a "lib" prefix
+# anyway) is the right name; on Linux that same setting means CMake emits cmpr.so
+# rather than the libcmpr.so that service/cmpr.py's non-Windows path expects, so the
+# rename happens here rather than touching a CMake target three platforms share.
+COPY --from=build /src/build/cmpr.so ./build/libcmpr.so
 
 # Matches service/cmpr.py's _default_library_path(): <repo root>/build/libcmpr.so,
 # and __file__.resolve().parent.parent from service/server.py is /app here.
