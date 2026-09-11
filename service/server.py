@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -41,50 +42,11 @@ from cmpr import Compressor, CompressionError  # noqa: E402
 # can decide how much memory the server allocates.
 MAX_UPLOAD = 256 * 1024 * 1024
 
-INDEX_PAGE = """<!doctype html>
-<title>cmpr</title>
-<style>
- body{font:15px/1.6 system-ui,sans-serif;max-width:38rem;margin:3rem auto;padding:0 1rem}
- code{background:#f4f4f5;padding:.1rem .3rem;border-radius:3px}
- .row{margin:1rem 0}
-</style>
-<h1>cmpr</h1>
-<p>LZ77 + canonical Huffman, written from scratch. Pick a file and get it back smaller.</p>
-<form method="post" enctype="application/octet-stream" id="f">
-  <div class="row"><input type="file" id="file" required></div>
-  <div class="row">
-    <button type="submit" name="op" value="compress">Compress</button>
-    <button type="submit" name="op" value="decompress">Decompress</button>
-  </div>
-</form>
-<pre id="out"></pre>
-<script>
-const form = document.getElementById('f');
-let op = 'compress';
-for (const b of form.querySelectorAll('button')) b.onclick = () => { op = b.value; };
-form.onsubmit = async (event) => {
-  event.preventDefault();
-  const file = document.getElementById('file').files[0];
-  if (!file) return;
-  const out = document.getElementById('out');
-  out.textContent = 'working...';
-  const started = performance.now();
-  const response = await fetch('/' + op + '?threads=0', {method: 'POST', body: file});
-  if (!response.ok) { out.textContent = 'error: ' + await response.text(); return; }
-  const blob = await response.blob();
-  const ms = performance.now() - started;
-  const pct = (100 * (1 - blob.size / file.size)).toFixed(2);
-  out.textContent = `${file.size.toLocaleString()} -> ${blob.size.toLocaleString()} bytes`
-    + ` (${pct}% change) in ${ms.toFixed(0)} ms`;
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = file.name + (op === 'compress' ? '.cmpr' : '.out');
-  link.textContent = 'download';
-  out.appendChild(document.createTextNode('  '));
-  out.appendChild(link);
-};
-</script>
-"""
+# The demo page lives in index.html rather than in a string literal here: markup does not
+# belong inside a Python file, and keeping it separate means it can be opened, diffed and
+# edited as HTML. Read once at import -- it never changes at runtime, and re-reading it
+# per request would put a disk hit inside the latency the load test measures.
+INDEX_PAGE = (Path(__file__).resolve().parent / "index.html").read_text(encoding="utf-8")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -128,6 +90,10 @@ class Handler(BaseHTTPRequestHandler):
                 "version": self.codec.version(),
                 "default_threads": self.default_threads,
                 "max_upload_bytes": MAX_UPLOAD,
+                # The demo page shows this so the thread selector can say plainly when the
+                # container has too few cores for the speedup to appear. A benchmark number
+                # without the hardware it was taken on is not a number.
+                "cpus": os.cpu_count(),
             })
         elif route == "/":
             self._send(HTTPStatus.OK, INDEX_PAGE.encode(), "text/html; charset=utf-8")
